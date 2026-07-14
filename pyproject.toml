@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag"
+version = "0.1.0"
+description = "RAG project"
+requires-python = ">=3.10"
+dependencies = [
+    # 项目实际依赖的第三方库，例如：
+    # "openai>=1.0.0",
+    # "numpy",
+]
+
+[tool.setuptools]
+packages = ["config", "scripts","indexing"]
