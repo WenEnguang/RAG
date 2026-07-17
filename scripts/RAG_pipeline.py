@@ -55,11 +55,12 @@ def retrieve(question:str, top_k:int):
     docs = vector_store.similarity_search(query=question, k=top_k)
     return [doc.page_content for doc in docs]   # docs是Documents列表对象，返回的是每个Document的page_content属性，即文本内容，剩下的元数据属性暂时不需要
 
-def generate(question:str, top_k:int = None):
+def generate(question:str, top_k:int = None, context:list = None):
     """
     生成答案
         :param question: 用户的提问
         :param top_k: 检索的片段数量
+        :param context: 提供的上下文信息
         :return: LLM生成的答案
     """
     # 生成阶段：将检索到的信息与用户提问拼接到一起，形成一个完整的prompt，传给LLM生成答案
@@ -78,11 +79,12 @@ def generate(question:str, top_k:int = None):
 def rag_answer(question:str, top_k:int = None):
     """完整RAG查询：检索 + 生成，一次调用拿到全部结果"""
     contexts = retrieve(question, top_k)    # 检索内容
-    answer = generate(question, top_k)
+    answer = generate(question, top_k, contexts)  # 生成答案
     return {
         "question": question,
         "retrieved_contexts": contexts,
-        "answer": answer
+        "answer": answer,
+        "response": answer,  # 兼容旧版本的字段名
     }
 
 if __name__ == "__main__":
