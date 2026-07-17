@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # --- LLM (DeepSeek，OpenAI兼容接口) ---
     deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY")
     deepseek_base_url: str = "https://api.deepseek.com"
-    llm_model: str = "deepseek-chat"
+    llm_model: str = "deepseek-v4-flash"
     llm_temperature: float = 0.0  # RAG场景建议低温度，减少胡编
 
     # --- Embedding (本地模型) ---
@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # --- 向量库（本地persist模式） ---
     chroma_persist_dir: str = os.path.join(project_dir, 'chroma_db')  # 本地存储目录
     chroma_collection_name: str = "notes"  
+
+    # --- 输出目录 ---
+    output_dir: str = os.path.join(project_dir, 'output')  # 输出目录
 
     # --- 数据目录 ---
     notes_dir: str = os.path.join(project_dir, 'data/notes')  # 笔记目录
