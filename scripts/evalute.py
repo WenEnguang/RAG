@@ -28,6 +28,7 @@ sys.modules["langchain_community.chat_models.vertexai"] = _fake_module
 from config.settings import settings
 from RAG_pipeline import rag_answer,embedding_model
 
+from ragas.run_config import RunConfig
 from ragas import EvaluationDataset, evaluate
 from ragas.llms import LangchainLLMWrapper
 from ragas.metrics import Faithfulness, ResponseRelevancy, LLMContextPrecisionWithReference, LLMContextRecall
@@ -63,7 +64,8 @@ evaluator_llm = LangchainLLMWrapper(
         base_url=settings.deepseek_base_url,
         model=settings.llm_model,
         temperature=0,
-    )
+    ),
+    bypass_n = True, 
 )
 evaluator_embeddings = LangchainEmbeddingsWrapper(
     embedding_model
@@ -76,6 +78,10 @@ evaluator_embeddings = LangchainEmbeddingsWrapper(
 
 # ---- 4. 跑评测 ----
 # Faithfulness / ResponseRelevancy 看生成端；ContextPrecision / ContextRecall 看检索端
+my_config = RunConfig(
+    timeout=300,
+    max_workers=4,
+)
 result = evaluate(
     dataset=evaluation_dataset,
     metrics=[
@@ -85,7 +91,9 @@ result = evaluate(
         LLMContextRecall()
     ],
     llm=evaluator_llm,
-    embeddings=evaluator_embeddings
+    embeddings=evaluator_embeddings,
+    run_config=my_config,
+    raise_exceptions=True,
 )
 
 # ---- 5. 保存结果，方便和下一次改配置后的结果做对比 ----
