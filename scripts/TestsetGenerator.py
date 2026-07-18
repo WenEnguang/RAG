@@ -3,11 +3,8 @@ import sys
 import types
 
 # ---- 修补 ragas 对已废弃路径 langchain_community.chat_models.vertexai 的依赖 ----
-# 原因：langchain-community 0.4.x 已移除该文件，ChatVertexAI 现在在 langchain-google-vertexai 包里，
-# 但 ragas/llms/base.py 里的 import 语句还没跟上，导致 import ragas 直接报 ModuleNotFoundError。
-# 这里在 ragas 被导入之前，手动往 sys.modules 注册一个转发模块，绕开这个死路径。
 try:
-    import langchain_community.chat_models.vertexai  # 如果哪天官方修好了，这里就不会报错
+    import langchain_community.chat_models.vertexai
 except ModuleNotFoundError:
     from langchain_google_vertexai import ChatVertexAI
     shim = types.ModuleType("langchain_community.chat_models.vertexai")
@@ -20,24 +17,50 @@ from dotenv import load_dotenv, find_dotenv
 
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
-from ragas.llms import llm_factory
 from ragas.embeddings import LangchainEmbeddingsWrapper
-from openai import OpenAI
 from ragas.testset import TestsetGenerator
 from ragas.llms import LangchainLLMWrapper
 from langchain_openai import ChatOpenAI
 from ragas.testset.persona import Persona
 
-# 加载环境变量
 _ = load_dotenv(find_dotenv())
 
-# 读取数据
+# ---- 1. 读取文档 ----
 md_path = settings.notes_dir
 loader = DirectoryLoader(md_path, glob="**/*.md", loader_cls=TextLoader)
 docs = loader.load()
-# docs = docs[:2]  # 临时修改，只取前2个文档，避免测试集生成太慢
+print(f"共加载 {len(docs)} 篇笔记")
 
-# 加载LLM和Embedding模型
+# ---- 2. 给 HeadlineSplitter 打容错补丁 ----
+# 背景：ragas的HeadlinesExtractor基于LLM生成结果，对少数文档（原因不完全确定，
+# 可能是内容结构、也可能是LLM返回的随机性）有一定概率提取失败，没能写入
+# headlines属性。下游HeadlineSplitter遇到缺失属性时会直接raise ValueError，
+# 且这一步不受generate_with_langchain_docs的raise_exceptions参数控制，
+# 之前尝试"过滤短文档"证明和文档长度无必然关系，问题更可能出在个别节点的
+# 随机性上。这里直接给split方法打补丁：遇到这个特定错误时，不再让它中断整个
+# 生成流程，而是跳过对该节点的标题切分（该节点仍以整篇形式保留在知识图谱里，
+# 依然可以参与后续的简单问答生成，只是不会被细分成多个子节点）。
+from ragas.testset.transforms.splitters.headline import HeadlineSplitter
+
+_original_split = HeadlineSplitter.split
+
+
+async def _patched_split(self, node):
+    try:
+        return await _original_split(self, node)
+    except ValueError as e:
+        if "headlines" in str(e):
+            source = node.properties.get("document_metadata", {}).get("source", "未知来源")
+            print(f"  [容错跳过] 节点标题提取失败，跳过切分: {source}")
+            return [], []
+        raise
+
+
+HeadlineSplitter.split = _patched_split
+# ---- 补丁结束 ----
+
+
+# ---- 3. 初始化LLM与Embedding ----
 generator_llm = LangchainLLMWrapper(
     ChatOpenAI(
         model=settings.llm_model,
@@ -45,13 +68,15 @@ generator_llm = LangchainLLMWrapper(
         base_url=settings.deepseek_base_url,
     )
 )
+
 local_embeddings = HuggingFaceEmbeddings(
-    model_name=settings.embedding_model,   # 本地目录路径，正好对上
-    model_kwargs={"device": "cuda"},        # 没有GPU就改成 "cpu"
+    model_name=settings.embedding_model,
+    model_kwargs={"device": "cuda"},  # 没有GPU改成 "cpu"
     encode_kwargs={"normalize_embeddings": True},
 )
 generator_embedding = LangchainEmbeddingsWrapper(local_embeddings)
 
+# ---- 4. 中文persona，避免多跳问题生成时退回英文默认人格 ----
 my_personas = [
     Persona(
         name="RAG初学者",
@@ -70,20 +95,35 @@ my_personas = [
     ),
 ]
 
-# 生成测试集
+# ---- 5. 生成测试集 ----
 generator = TestsetGenerator(
     llm=generator_llm,
     embedding_model=generator_embedding,
     persona_list=my_personas,
 )
+
 dataset = generator.generate_with_langchain_docs(
     documents=docs,
     testset_size=20,
-    raise_exceptions=False
+    raise_exceptions=False,
 )
+
 df = dataset.to_pandas()
 
-output_path = os.path.join(settings.output_dir, "testset.csv")  # 换成你想要的确定路径
-os.makedirs(settings.output_dir, exist_ok=True)  # 确保输出目录存在
+output_path = os.path.join(settings.output_dir, "testset.csv")
+os.makedirs(settings.output_dir, exist_ok=True)
 df.to_csv(output_path, index=False)
-print(f"测试集已保存至: {output_path}")
+
+print(f"\n测试集已保存至: {output_path}")
+print(f"共生成 {len(df)} 条测试问题")
+
+# ---- 6. 快速质量自检 ----
+print("\n===== 快速质量检查 =====")
+non_ascii_check = df["user_input"].apply(lambda x: any(ord(c) > 127 for c in x))
+english_only_rows = df[~non_ascii_check]
+if len(english_only_rows) > 0:
+    print(f"⚠️ 发现 {len(english_only_rows)} 条问题不含中文字符（可能是英文问题混入），建议人工检查：")
+    for idx, row in english_only_rows.iterrows():
+        print(f"  [{idx}] {row['user_input']}")
+else:
+    print("✅ 未发现明显的英文问题混入")
