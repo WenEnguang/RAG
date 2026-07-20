@@ -93,7 +93,7 @@ result = evaluate(
     llm=evaluator_llm,
     embeddings=evaluator_embeddings,
     run_config=my_config,
-    raise_exceptions=True,
+    raise_exceptions=False,
 )
 
 # ---- 5. 保存结果，方便和下一次改配置后的结果做对比 ----
