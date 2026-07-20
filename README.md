@@ -1,565 +1,205 @@
-# RAG — 个人笔记检索增强生成系统
+# RAG - Personal Notes Retrieval-Augmented Generation
 
-一个面向个人笔记的 RAG（Retrieval-Augmented Generation，检索增强生成）实验项目。
+一个面向个人 Markdown 笔记的 RAG 实验项目。项目不追求一步做成完整产品，而是从可运行的基线出发，逐步验证文档切分、向量检索、答案生成和量化评估对结果的影响。
 
-项目目标不是直接做成一个完整应用，而是从最朴素的 Baseline 开始，把 RAG 的关键环节一步一步跑通、拆开、评估和优化：文档加载、切分、向量化、索引构建、检索、生成、量化评测。
+当前已完成 Phase 0 基线，并已跑通 RAGAS 自动测试集生成与四项指标评估。后续每次策略改动都应沿用同一套测试集和评测流程，形成可比较的实验记录。
 
-当前阶段已经完成 **Phase 0 基线系统**：可以读取 Markdown 笔记，构建本地 Chroma 向量索引，根据用户问题检索相关片段，并调用 DeepSeek 生成基于资料的回答。同时，项目已经接入 RAGAS，用于对检索和生成效果进行量化评估。
+## 当前状态
 
-## 当前进度
+| 模块 | 状态 | 当前实现 |
+| --- | --- | --- |
+| 文档加载 | 已完成 | 递归读取 `data/notes/` 下的 Markdown |
+| 文本切分 | 已完成 | `RecursiveCharacterTextSplitter`，`chunk_size=500`、`chunk_overlap=50` |
+| 向量化 | 已完成 | 本地 `Qwen3-Embedding-0.6B`，向量归一化 |
+| 向量库 | 已完成 | Chroma 本地持久化 |
+| 查询与生成 | 已完成 | Chroma 相似度检索 + DeepSeek OpenAI-compatible API |
+| 自动测试集 | 已完成 | RAGAS 单跳问题生成，面向远程 Markdown 做了兼容处理 |
+| RAGAS 评估 | 已完成 | Faithfulness、Answer Relevancy、Context Precision、Context Recall |
+| 混合检索 / Reranker | 未开始 | Phase 1 优先项 |
+| 结构化切分 / PDF / WebUI | 未开始 | 后续阶段 |
 
-### 已完成
+## 系统流程
 
-- Markdown 笔记加载：从 `data/notes/` 读取 `.md` 文件
-- 固定长度切分：使用 `RecursiveCharacterTextSplitter`
-- 本地 Embedding：使用 `Qwen3-Embedding-0.6B`
-- 本地向量库：使用 Chroma 持久化到 `chroma_db/`
-- 基础检索：使用 Chroma `similarity_search`
-- LLM 生成：使用 DeepSeek OpenAI-compatible API
-- 主链路封装：提供 `retrieve()`、`generate()`、`rag_answer()`
-- 索引构建脚本：单独提供 `scripts/build_vectorstore.py`
-- 验证脚本：Embedding、LLM、完整 RAG 流程均有验证脚本
-- RAGAS 评测：自动生成测试集并进行量化评估
-- 实验记录：在 `experiments/notebooks/` 中记录阶段性结果和问题
-
-### 尚未完成
-
-- 混合检索（向量 + BM25）
-- Reranker 重排序
-- 更稳健的 chunk 策略
-- PDF 文档接入
-- WebUI
-- 更完整、稳定的评测基准
-
-## 项目定位
-
-这是一个学习型、实验型 RAG 项目，适合用来理解：
-
-- RAG 的完整执行链路是什么
-- chunk size、overlap、top-k 等参数如何影响结果
-- 为什么纯向量检索在语料变多后会出现误召回
-- 如何用 RAGAS 对 RAG 系统做量化评估
-- 后续如何逐步优化检索、切分和生成效果
-
-设计原则是：**先跑通，再拆开；先有 Baseline，再做实验；每次只优化一个关键环节，用结果说话。**
-
-## 执行逻辑
-
-### 索引构建阶段
-
-```text
-Markdown 笔记
-  ↓
-DirectoryLoader 加载 data/notes/*.md
-  ↓
-RecursiveCharacterTextSplitter 切分文档
-  ↓
-HuggingFaceEmbeddings 生成向量
-  ↓
-Chroma.from_documents 写入本地向量库
-  ↓
-索引持久化到 chroma_db/
+```mermaid
+flowchart LR
+    A[Markdown notes] --> B[Load and split]
+    B --> C[Qwen3 embeddings]
+    C --> D[(Chroma)]
+    Q[User question] --> E[Similarity search]
+    D --> E
+    E --> F[Context + prompt]
+    F --> G[DeepSeek]
+    G --> H[Answer]
+    A --> I[RAGAS testset]
+    I --> J[Run RAG pipeline]
+    J --> K[RAGAS metrics]
 ```
 
-对应脚本：
+核心查询入口是 `rag_answer(question, top_k)`，返回问题、实际检索到的上下文和答案。生成阶段的提示词要求模型只能依据检索上下文回答；缺少依据时返回固定拒答语句。
 
-```bash
-python scripts/build_vectorstore.py
-```
+## 本次进展：RAGAS 评测链路
 
-### 用户查询阶段
+本次更新主要集中在 `scripts/` 与 `experiments/`：补齐了测试集生成与评测的兼容处理，并完成了一次可用的定量评估。
 
-```text
-用户问题
-  ↓
-使用同一个 Embedding 模型向量化问题
-  ↓
-Chroma similarity_search 检索 top-k 个相关 chunk
-  ↓
-将检索片段与问题拼接进 Prompt
-  ↓
-调用 DeepSeek LLM
-  ↓
-返回基于上下文的回答
-```
+### 已解决的问题
 
-核心入口：
+- RAGAS 与新版 `langchain_community` 的 VertexAI 导入路径不兼容；项目使用临时模块兼容层绕过未使用的 VertexAI 依赖。
+- 远程 Markdown 的标题结构不稳定，RAGAS 的 `HeadlineSplitter` 会因节点没有 `headlines` 属性失败。测试集生成改为在文档节点上提取主题和实体，再以主题生成单跳问题。
+- DeepSeek 的 OpenAI-compatible API 仅支持 `n=1`；RAGAS 的 LangChain wrapper 启用了 `bypass_n=True`。
+- 为生成和评估设置超时与并发参数，避免 API 请求长时间无反馈或失败被静默吞掉。
 
-```python
-from scripts.RAG_pipeline import rag_answer
+这些改动不改变主 RAG 查询逻辑，目标是让评测链路能够稳定地围绕当前基线运行。
 
-result = rag_answer("什么是 RAG Embedding？")
-print(result["answer"])
-```
+### 最新评测结果
 
-返回结构：
+最新一次记录使用 RAGAS 自动生成的 20 条测试样本，并对 20 条 RAG 响应完成评估。
 
-```python
-{
-    "question": "...",
-    "retrieved_contexts": ["...", "..."],
-    "answer": "...",
-    "response": "..."
-}
-```
+| 指标 | 平均分 | 观察 |
+| --- | ---: | --- |
+| Faithfulness | 0.8462 | 大多数回答有检索上下文支持，仍有约 15% 的内容存在脱离上下文的风险。 |
+| Answer Relevancy | 0.7579 | 当前最需要关注的生成端指标，答案与问题的贴合度还有提升空间。 |
+| Context Precision with Reference | 0.8361 | 多数检索片段有用，但仍混入部分弱相关上下文。 |
+| Context Recall | 0.9333 | 当前表现最好，参考答案所需的信息大多能够被召回。 |
 
-## 快速开始
+这些分数是当前语料、测试集和模型配置下的基线，不应与其他语料或不同测试集的分数直接比较。更重要的是：从这里开始，后续检索、切分或生成策略的调整可以用同一流程做 A/B 对比。
 
-### 环境要求
+详细过程和终端结果见：
 
-- Python >= 3.10
-- 推荐有 CUDA 环境；小规模测试也可以使用 CPU
-- 需要 DeepSeek API Key
-
-### 安装依赖
-
-当前项目还没有把完整依赖固化进 `pyproject.toml`，可以先手动安装：
-
-```bash
-pip install langchain langchain-community langchain-text-splitters \
-    langchain-huggingface langchain-chroma langchain-openai \
-    openai ragas pandas tqdm torch \
-    pydantic-settings python-dotenv
-```
-
-### 配置 API Key
-
-复制环境变量模板：
-
-```bash
-cp .env.example .env
-```
-
-填写 `.env`：
-
-```env
-DEEPSEEK_API_KEY=sk-你的真实key
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-```
-
-DeepSeek 使用 OpenAI 兼容接口。项目中：
-
-- RAG 查询链路使用原生 `openai` client
-- RAGAS 评测链路使用 `langchain_openai.ChatOpenAI`
-
-### 准备 Embedding 模型
-
-当前默认使用本地模型：
-
-```text
-../Pre_Models/Qwen3-Embedding-0.6B
-```
-
-配置位置：
-
-```python
-# config/settings.py
-embedding_model = "../Pre_Models/Qwen3-Embedding-0.6B"
-```
-
-如果本地没有模型，首次运行可能会尝试从 HuggingFace 下载。国内网络较慢时，可以设置镜像：
-
-```bash
-export HF_ENDPOINT=https://hf-mirror.com
-```
-
-### 准备笔记
-
-将 Markdown 文件放到：
-
-```text
-data/notes/
-```
-
-当前项目的目标输入主要是个人 Markdown 笔记。`data/pdfs/` 已经预留，但 PDF 加载逻辑尚未接入。
-
-## 常用命令
-
-验证 Embedding 模型：
-
-```bash
-python scripts/test/test_embedding.py
-```
-
-验证 DeepSeek API：
-
-```bash
-python scripts/test/test_llm.py
-```
-
-构建或重建向量索引：
-
-```bash
-python scripts/build_vectorstore.py
-```
-
-运行完整 RAG 冒烟测试，并分析 chunk 质量：
-
-```bash
-python scripts/test/test_chunk_size.py
-```
-
-生成 RAGAS 测试集：
-
-```bash
-python scripts/TestsetGenerator.py
-```
-
-运行 RAGAS 量化评测：
-
-```bash
-python scripts/evalute.py
-```
+- `experiments/基线测试结果记录.md`
+- `experiments/初期结果评估记录.md`
+- `experiments/库版本冲突解决流程.md`
 
 ## 项目结构
 
 ```text
 RAG/
 ├── config/
-│   └── settings.py              # 统一配置：模型、路径、chunk、top-k 等
+│   └── settings.py                 # 模型、路径、切分、检索等统一配置
 ├── indexing/
-│   └── vectorstore.py           # Chroma 工厂函数
+│   └── vectorstore.py              # Chroma 的构建与连接封装
 ├── scripts/
-│   ├── RAG_pipeline.py          # 核心查询链路：retrieve/generate/rag_answer
-│   ├── build_vectorstore.py     # 构建或重建向量索引
-│   ├── TestsetGenerator.py      # 使用 RAGAS 自动生成测试集
-│   ├── evalute.py               # RAGAS 量化评测脚本
-│   └── test/
-│       ├── test_embedding.py    # Embedding 模型验证
-│       ├── test_llm.py          # DeepSeek API 验证
-│       ├── test.py              # 早期 LCEL 全流程冒烟测试
-│       └── test_chunk_size.py   # chunk 质量分析 + 全流程测试
-├── output/
-│   ├── testset.csv              # RAGAS 测试集输出
-│   └── eval_result.csv          # RAGAS 评测结果输出
-├── experiments/
-│   └── notebooks/               # 实验记录与阶段性总结
-├── data/
-│   ├── notes/                   # Markdown 笔记，未提交到仓库
-│   └── pdfs/                    # PDF 目录，暂未接入
-└── chroma_db/                   # Chroma 本地向量库，未提交到仓库
+│   ├── build_vectorstore.py        # 加载 Markdown、切分、向量化、写入 Chroma
+│   ├── RAG_pipeline.py             # retrieve / generate / rag_answer
+│   ├── TestsetGenerator.py         # RAGAS 自动生成测试集
+│   ├── evalute.py                  # RAGAS 定量评估
+│   └── test/                       # Embedding、LLM、chunk 与冒烟测试
+├── experiments/                    # 实验现象、问题与结果记录
+├── output/                         # testset.csv 与 eval_result.csv
+├── data/                           # 本地 Markdown / PDF，默认不提交
+└── chroma_db/                      # 本地 Chroma 数据，默认不提交
 ```
 
-## 核心模块说明
+## 环境准备
 
-### `config/settings.py`
+要求：Python 3.10+、DeepSeek API Key；构建索引和查询均可使用 CPU，但本地 Embedding 在 CUDA 环境下更适合较大语料。
 
-统一管理所有可调参数：
-
-- DeepSeek API 配置
-- Embedding 模型路径
-- Chroma 持久化路径
-- 数据目录
-- 输出目录
-- chunk 参数
-- retrieval top-k
-
-当前关键参数：
-
-```python
-chunk_size = 500
-chunk_overlap = 50
-retrieval_top_k = 4
-chroma_collection_name = "notes"
-llm_temperature = 0.0
-```
-
-### `indexing/vectorstore.py`
-
-对 Chroma 做了一层薄封装：
-
-- `build_vectorstore(chunks, embeddings)`：写入文档并建立索引
-- `get_vectorstore(embeddings)`：连接已有本地向量库
-
-这样后续如果要替换为 Qdrant、Milvus 或 PGVector，优先改这一层。
-
-### `scripts/RAG_pipeline.py`
-
-当前最重要的查询入口。
-
-提供三个函数：
-
-- `retrieve(question, top_k)`：从 Chroma 检索相关片段
-- `generate(question, top_k, context)`：拼接 prompt 并调用 DeepSeek
-- `rag_answer(question, top_k)`：完整执行检索 + 生成
-
-Prompt 约束模型只能基于参考资料回答：
-
-```text
-如果参考资料中没有相关的信息，请直接回答“抱歉，我无法回答这个问题。”，不要编造答案。
-```
-
-### `scripts/build_vectorstore.py`
-
-用于数据更新后的索引构建：
-
-1. 加载 Markdown
-2. 切分 chunk
-3. 初始化 Embedding
-4. 写入 Chroma
-
-这个脚本会自动判断 CUDA/CPU：
-
-```python
-device = "cuda" if torch.cuda.is_available() else "cpu"
-```
-
-### `scripts/evalute.py`
-
-评测流程：
-
-1. 读取 `output/testset.csv`
-2. 对每个测试问题调用 `rag_answer()`
-3. 收集实际检索片段和实际回答
-4. 使用 RAGAS 指标打分
-5. 输出到 `output/eval_result.csv`
-
-当前使用的指标：
-
-- Faithfulness
-- ResponseRelevancy
-- LLMContextPrecisionWithReference
-- LLMContextRecall
-
-## Phase 0 结果
-
-### Embedding 验证
-
-验证脚本：
+当前依赖尚未完全固化到 `pyproject.toml`。可先安装：
 
 ```bash
+pip install langchain langchain-community langchain-text-splitters \
+  langchain-huggingface langchain-chroma langchain-openai \
+  openai ragas pandas tqdm torch pydantic-settings python-dotenv
+```
+
+创建 `.env`：
+
+```bash
+cp .env.example .env
+```
+
+```env
+DEEPSEEK_API_KEY=sk-your-key
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+```
+
+本地 Embedding 模型默认路径为项目同级目录的 `Pre_Models/Qwen3-Embedding-0.6B`，可在 `config/settings.py` 中调整。
+
+把 Markdown 笔记放在 `data/notes/`。该目录、Chroma 数据和本地模型均不随 Git 同步，因此远程服务器需要自行准备相同的数据与模型。
+
+## 常用命令
+
+```bash
+# 验证本地 Embedding 的维度与基础语义相似度
 python scripts/test/test_embedding.py
-```
 
-阶段性结果：
-
-```text
-向量维度: 1024
-生成了 3 条向量
-语义相近句子相似度: 0.8700
-语义无关句子相似度: 0.3364
-Embedding 模型验证通过
-```
-
-### LLM 验证
-
-验证脚本：
-
-```bash
+# 验证 DeepSeek API 连通性
 python scripts/test/test_llm.py
-```
 
-阶段性结果：
+# 构建或重建 Chroma 索引
+python scripts/build_vectorstore.py
 
-```text
-DeepSeek API 调用正常
-能够用一句话解释 RAG
-LLM 调用验证通过
-```
-
-### 全流程验证
-
-验证脚本：
-
-```bash
+# 查看 chunk 质量并执行基线冒烟测试
 python scripts/test/test_chunk_size.py
-```
 
-当前在 7 篇 Markdown 笔记上的 chunk 分析：
+# 单次查询 / 交互式验证 RAG 主链路
+python scripts/RAG_pipeline.py
 
-```text
-总 chunk 数量: 102
-平均长度: 377.7
-最大长度: 494
-最小长度: 3
-
-长度分布:
-0-300: 22
-300-600: 80
-600+: 0
-```
-
-测试问题：
-
-```text
-RAG系统的基本流程有哪些步骤？
-```
-
-系统能够检索到相关上下文，并回答出：
-
-```text
-1. 文档切分
-2. 向量化
-3. 索引建立
-4. 检索
-5. 生成
-```
-
-## RAGAS 评测
-
-当前项目已经可以通过 RAGAS 自动生成测试集并评估。
-
-生成测试集：
-
-```bash
+# 生成 RAGAS 测试集
 python scripts/TestsetGenerator.py
-```
 
-运行评测：
-
-```bash
+# 运行 RAGAS 评估并写入 output/eval_result.csv
 python scripts/evalute.py
 ```
 
-已有评测记录显示：
+当 `data/notes/` 有新增或修改时，先重建索引，再生成测试集或执行评测。为了让对比有效，策略实验期间应固定一份测试集；只有语料范围明显变化时再重新生成测试集。
 
-```text
-answer_relevancy: 0.8625
-context_recall: 1.0000
-faithfulness: nan
-llm_context_precision_with_reference: nan
-```
+## 当前基线配置
 
-这说明评测链路已经跑通，但指标稳定性还需要继续处理。尤其是 `faithfulness` 和 `context_precision` 出现 `nan`，后续需要检查 RAGAS 版本兼容、裁判模型输出格式、测试集字段和指标适配情况。
-
-## 当前发现的问题
-
-### 1. 固定长度切分比较粗糙
-
-当前使用：
+配置集中在 `config/settings.py`，便于后续 A/B 实验尽量只改参数、不改主流程。
 
 ```python
-RecursiveCharacterTextSplitter(
-    chunk_size=500,
-    chunk_overlap=50,
-)
+llm_model = "deepseek-v4-flash"
+embedding_model = "../Pre_Models/Qwen3-Embedding-0.6B"
+chunk_size = 500
+chunk_overlap = 50
+retrieval_top_k = 4
+llm_temperature = 0.0
 ```
 
-问题：
+已完成的局部验证包括：
 
-- 可能截断语义完整段落
-- 可能切断标题和正文关系
-- 可能产生极短 chunk
-- 对代码块、多级标题、长段落适应性一般
+- Embedding 输出 1024 维向量；语义相近示例相似度为 0.8700，语义无关示例为 0.3364。
+- 单文档基线冒烟测试通过。
+- 7 篇 Markdown 的 chunk 分析得到 102 个 chunk，平均长度 377.7，最大 494，最小 3。
 
-### 2. 纯向量检索存在误召回
+## 已知限制
 
-当笔记从 1 篇扩展到 7 篇后，已经观察到：
+- 固定长度切分会产生极短 chunk，并可能切断标题、段落、代码块或指代关系。
+- 当前仅使用纯向量相似度检索。随着语料扩大，已观察到 RAG 问题可能召回 Transformer 等语义接近但任务无关的内容。
+- `RAG_pipeline.py` 当前固定使用 CUDA；而索引脚本会自动选择 CUDA/CPU，两者还没有统一。
+- RAGAS 的 LangChain wrapper 仍会给出弃用提示。当前兼容层能运行，但依赖版本需要在后续整理并锁定。
+- 自动生成的问题可能有错别字、覆盖不均等问题；用于趋势比较前应抽样审阅测试集质量。
+- PDF 目录已预留，但尚未进入加载、切分和索引流程。
 
-- 问 RAG 相关问题时，可能召回 Transformer 内容
-- top-k 中会混入语义相似但任务不相关的片段
-- 向量相似度本身不足以表达“这个片段是否真的应该被用于回答”
+## 下一步实验路线
 
-后续需要引入：
+1. 检索优化：引入 BM25，与向量召回做混合检索，并加入 Reranker。重点观察 Context Precision 和 Answer Relevancy 是否提升。
+2. 切分优化：按 Markdown 标题和段落结构切分，保留标题上下文，比较极短 chunk 数量与 RAGAS 指标变化。
+3. 可追溯性：把来源文件、标题和片段位置写入 metadata，并在答案中返回来源。
+4. 工程化：统一 CPU/CUDA 设备选择，锁定依赖版本，移除临时兼容代码。
+5. 扩展输入：接入 PDF，保留页码和来源信息。
+6. 交互入口：使用 Streamlit 或 Gradio 展示问题、检索上下文、回答与评测结果。
 
-- BM25
-- 混合检索
-- Reranker
-- 查询改写
-- 元数据过滤
+## 学习日志维护方式
 
-### 3. 查询链路中的设备选择还不够稳健
+每完成一次实验，在 `experiments/` 新增或更新记录，并同步更新下面的条目：
 
-`build_vectorstore.py` 已经支持 CUDA/CPU 自动选择，但 `RAG_pipeline.py` 里仍然写死：
-
-```python
-model_kwargs={"device": "cuda"}
+```markdown
+### YYYY-MM-DD - 实验名称
+- 目标：
+- 改动：
+- 数据与测试集：
+- 结果：
+- 结论：
+- 下一步：
 ```
 
-如果没有 GPU，查询链路可能无法正常运行。后续应统一设备选择逻辑。
+| 日期 | 阶段 | 进展 |
+| --- | --- | --- |
+| 2026-07 | Phase 0 | 跑通 Markdown -> Chroma -> 检索 -> DeepSeek 生成的基线链路。 |
+| 2026-07 | 评测基础设施 | 解决 RAGAS / LangChain 兼容、远程 Markdown 标题与 DeepSeek `n=1` 限制，生成 20 条测试集并完成四项指标评估。 |
+| 下一阶段 | Phase 1 | 以当前 RAGAS 分数为对照，优先验证混合检索、重排与结构化切分。 |
 
-### 4. 依赖没有完全固化
+## 结论
 
-`pyproject.toml` 目前没有完整声明真实运行依赖。开源项目复现时，读者仍需要依赖 README 手动安装。
-
-后续应补齐：
-
-- `dependencies`
-- 可选 GPU 说明
-- RAGAS 兼容版本
-- Python 版本约束
-
-### 5. PDF 还只是预留
-
-`settings.py` 中已有：
-
-```python
-pdfs_dir = "data/pdfs"
-```
-
-但当前加载逻辑只处理 Markdown：
-
-```python
-glob="**/*.md"
-```
-
-PDF 解析、清洗、元数据保留、页码引用都还没有实现。
-
-## 下一阶段计划
-
-### Phase 1：检索质量优化
-
-优先级最高，因为当前最明显的问题是误召回。
-
-计划方向：
-
-- 引入 BM25 关键词检索
-- 实现向量检索 + BM25 的混合召回
-- 加入 Reranker 对候选 chunk 重排序
-- 保留每个 chunk 的来源文件、标题、位置等元数据
-- 对比优化前后的 RAGAS 指标变化
-
-### Phase 2：文档切分优化
-
-计划方向：
-
-- 基于 Markdown 标题层级切分
-- 保留标题上下文
-- 避免代码块被截断
-- 尝试父子 chunk 或多粒度 chunk
-- 对比不同 chunk 策略对检索结果的影响
-
-### Phase 3：PDF 接入
-
-计划方向：
-
-- 接入 PDF loader
-- 保留页码信息
-- 支持 Markdown + PDF 混合索引
-- 在回答中输出来源定位
-
-### Phase 4：交互入口
-
-计划方向：
-
-- Streamlit 或 Gradio WebUI
-- 展示检索到的上下文
-- 展示来源文件
-- 支持调整 top-k、chunk 策略和检索策略
-
-## 待办清单
-
-- [x] 搭建 Phase 0 RAG baseline
-- [x] 支持 Markdown 文档加载
-- [x] 支持本地 Embedding 模型
-- [x] 支持 Chroma 本地向量库
-- [x] 支持 DeepSeek 生成回答
-- [x] 拆分索引构建、查询、评测脚本
-- [x] 接入 RAGAS 测试集生成
-- [x] 接入 RAGAS 量化评测
-- [ ] 修复查询链路 CUDA/CPU 设备选择问题
-- [ ] 补齐 `pyproject.toml` 依赖
-- [ ] 实现 BM25 检索
-- [ ] 实现混合检索
-- [ ] 接入 Reranker
-- [ ] 优化 Markdown chunk 策略
-- [ ] 接入 PDF 文档
-- [ ] 增加 WebUI
-
-## 项目当前结论
-
-这个项目已经完成了一个可运行、可评估、可继续实验的 RAG 基线系统。
-
-当前最大的价值不是“已经做成一个完美问答系统”，而是已经搭好了后续实验的骨架：每次调整切分、检索、排序或生成策略，都可以通过同一套构建脚本、查询入口和评测流程进行对比。
-
-下一步最值得投入的是 **检索质量优化**。只有先解决“召回的上下文是否真的相关”，后面的 Prompt 优化、WebUI 和多格式接入才更有意义。
+项目现在具备了“可运行、可观测、可评估”的最小闭环。当前最有价值的工作不是立刻扩展界面或输入格式，而是先用已有 RAGAS 基线验证检索质量改进：让召回的上下文更相关，再观察生成答案是否随之更贴近问题、更加忠实于资料。
