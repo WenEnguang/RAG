@@ -1,99 +1,193 @@
-# RAG - Personal Notes Retrieval-Augmented Generation
+# Personal Notes RAG
 
-一个面向个人 Markdown 笔记的 RAG 实验项目。项目不追求一步做成完整产品，而是从可运行的基线出发，逐步验证文档切分、向量检索、答案生成和量化评估对结果的影响。
+一个面向个人 Markdown 笔记的检索增强生成（RAG）实验项目。
 
-当前已完成 Phase 0 基线，并已跑通 RAGAS 自动测试集生成与四项指标评估。后续每次策略改动都应沿用同一套测试集和评测流程，形成可比较的实验记录。
+这个仓库的重点不是快速拼出一个问答界面，而是建立一套可复现的 RAG 实验方法：先实现稳定的基线，再生成测试集、量化评估，最后让混合检索等优化方案在同一评测条件下与基线比较。
 
-## 当前状态
+## 文档与结果入口
 
-| 模块 | 状态 | 当前实现 |
-| --- | --- | --- |
-| 文档加载 | 已完成 | 递归读取 `data/notes/` 下的 Markdown |
-| 文本切分 | 已完成 | `RecursiveCharacterTextSplitter`，`chunk_size=500`、`chunk_overlap=50` |
-| 向量化 | 已完成 | 本地 `Qwen3-Embedding-0.6B`，向量归一化 |
-| 向量库 | 已完成 | Chroma 本地持久化 |
-| 查询与生成 | 已完成 | Chroma 相似度检索 + DeepSeek OpenAI-compatible API |
-| 自动测试集 | 已完成 | RAGAS 单跳问题生成，面向远程 Markdown 做了兼容处理 |
-| RAGAS 评估 | 已完成 | Faithfulness、Answer Relevancy、Context Precision、Context Recall |
-| 混合检索 / Reranker | 未开始 | Phase 1 优先项 |
-| 结构化切分 / PDF / WebUI | 未开始 | 后续阶段 |
+- [`docs/ROADMAP.md`](docs/ROADMAP.md)：阶段计划、候选实验与验收标准。
+- [`docs/RESULTS.md`](docs/RESULTS.md)：已经验证的实验条件、指标、结论与证据。
+- `experiments/`：完整终端输出、失败排查和阶段性观察。
+- `output/`：当前运行产生的测试集与逐样本评测结果。
 
-## 系统流程
+README 只说明稳定的项目入口、架构和复现方式。尚未验证的能力只在路线图中作为计划出现；已完成的实验结果则以 `docs/RESULTS.md` 为准，保留历史基线而不覆盖旧结论。
+
+## 已验证结果
+
+项目已经跑通基线问答和 RAGAS 评测闭环。当前公开基线包含 20 条测试样本上的四项 RAGAS 指标，以及 Embedding、LLM、chunk 与端到端冒烟测试的记录。具体实验条件、指标解释、复现边界和证据文件见 [`docs/RESULTS.md`](docs/RESULTS.md)。
+
+## 项目目标
+
+- 将个人 Markdown 笔记构建为可检索的本地知识库。
+- 让 DeepSeek 基于检索到的上下文生成回答，并在资料不足时拒答。
+- 自动生成测试集，量化检索与生成质量。
+- 记录每个阶段的实验条件、结果、问题与结论，让后续优化有可靠对照。
+
+## 总体架构
 
 ```mermaid
 flowchart LR
-    A[Markdown notes] --> B[Load and split]
-    B --> C[Qwen3 embeddings]
-    C --> D[(Chroma)]
-    Q[User question] --> E[Similarity search]
-    D --> E
-    E --> F[Context + prompt]
-    F --> G[DeepSeek]
-    G --> H[Answer]
-    A --> I[RAGAS testset]
-    I --> J[Run RAG pipeline]
-    J --> K[RAGAS metrics]
+    Notes[Markdown notes] --> Split[Load and split]
+    Split --> Embed[Local embeddings]
+    Embed --> Store[(Chroma)]
+
+    Question[User question] --> Retrieve[Retrieve contexts]
+    Store --> Retrieve
+    Retrieve --> Answer[DeepSeek answer]
+
+    Notes --> Testset[RAGAS testset generation]
+    Testset --> Evaluate[Run RAG and evaluate]
+    Answer --> Evaluate
+    Evaluate --> Results[Experiment records]
 ```
 
-核心查询入口是 `rag_answer(question, top_k)`，返回问题、实际检索到的上下文和答案。生成阶段的提示词要求模型只能依据检索上下文回答；缺少依据时返回固定拒答语句。
+## 三条工作线
 
-## 本次进展：RAGAS 评测链路
+项目目前按三条彼此关联的工作线推进。
 
-本次更新主要集中在 `scripts/` 与 `experiments/`：补齐了测试集生成与评测的兼容处理，并完成了一次可用的定量评估。
+| 工作线 | 目标 | 核心产物 |
+| --- | --- | --- |
+| 建库与生成线 | 建立可运行、可复现的 RAG 基线 | Chroma 索引、`rag_answer()`、基线问答结果 |
+| 测试集与评估线 | 用统一数据集衡量 RAG 的检索与生成表现 | `testset.csv`、`eval_result.csv`、实验记录 |
+| 混合检索生成线 | 引入混合检索等优化，与基线进行同条件对比 | 优化方案、对照实验、指标变化分析 |
 
-### 已解决的问题
+三条线的关系是：
 
-- RAGAS 与新版 `langchain_community` 的 VertexAI 导入路径不兼容；项目使用临时模块兼容层绕过未使用的 VertexAI 依赖。
-- 远程 Markdown 的标题结构不稳定，RAGAS 的 `HeadlineSplitter` 会因节点没有 `headlines` 属性失败。测试集生成改为在文档节点上提取主题和实体，再以主题生成单跳问题。
-- DeepSeek 的 OpenAI-compatible API 仅支持 `n=1`；RAGAS 的 LangChain wrapper 启用了 `bypass_n=True`。
-- 为生成和评估设置超时与并发参数，避免 API 请求长时间无反馈或失败被静默吞掉。
+```text
+基线建库与生成
+    -> 生成测试集并固定评测条件
+    -> 得到基线分数
+    -> 实现混合检索生成
+    -> 使用相同测试集再次评测
+    -> 比较指标与案例，而不是只凭主观感受判断效果
+```
 
-这些改动不改变主 RAG 查询逻辑，目标是让评测链路能够稳定地围绕当前基线运行。
-
-### 最新评测结果
-
-最新一次记录使用 RAGAS 自动生成的 20 条测试样本，并对 20 条 RAG 响应完成评估。
-
-| 指标 | 平均分 | 观察 |
-| --- | ---: | --- |
-| Faithfulness | 0.8462 | 大多数回答有检索上下文支持，仍有约 15% 的内容存在脱离上下文的风险。 |
-| Answer Relevancy | 0.7579 | 当前最需要关注的生成端指标，答案与问题的贴合度还有提升空间。 |
-| Context Precision with Reference | 0.8361 | 多数检索片段有用，但仍混入部分弱相关上下文。 |
-| Context Recall | 0.9333 | 当前表现最好，参考答案所需的信息大多能够被召回。 |
-
-这些分数是当前语料、测试集和模型配置下的基线，不应与其他语料或不同测试集的分数直接比较。更重要的是：从这里开始，后续检索、切分或生成策略的调整可以用同一流程做 A/B 对比。
-
-详细过程和终端结果见：
-
-- `experiments/基线测试结果记录.md`
-- `experiments/初期结果评估记录.md`
-- `experiments/库版本冲突解决流程.md`
-
-## 项目结构
+## 目录说明
 
 ```text
 RAG/
-├── config/
-│   └── settings.py                 # 模型、路径、切分、检索等统一配置
-├── indexing/
-│   └── vectorstore.py              # Chroma 的构建与连接封装
+├── config/                         # 统一配置管理
+│   └── settings.py                  # 模型、路径、切分、检索等参数
+├── experiments/                    # 阶段验收与实验结果记录
+├── indexing/                       # 向量化存储层
+│   └── vectorstore.py               # Chroma 构建与连接封装
+├── output/                         # 运行时输出
+│   ├── testset.csv                  # RAGAS 自动生成的测试集
+│   └── eval_result.csv              # RAGAS 评测结果
 ├── scripts/
-│   ├── build_vectorstore.py        # 加载 Markdown、切分、向量化、写入 Chroma
-│   ├── RAG_pipeline.py             # retrieve / generate / rag_answer
-│   ├── TestsetGenerator.py         # RAGAS 自动生成测试集
-│   ├── evalute.py                  # RAGAS 定量评估
-│   └── test/                       # Embedding、LLM、chunk 与冒烟测试
-├── experiments/                    # 实验现象、问题与结果记录
-├── output/                         # testset.csv 与 eval_result.csv
-├── data/                           # 本地 Markdown / PDF，默认不提交
-└── chroma_db/                      # 本地 Chroma 数据，默认不提交
+│   ├── test/                        # 项目早期的冒烟测试与局部验证脚本
+│   ├── build_vectorstore.py         # 建库：加载、切分、向量化、写入 Chroma
+│   ├── RAG_pipeline.py              # 基线检索与生成主链路
+│   ├── TestsetGenerator.py          # 自动生成测试评估数据集
+│   └── evalute.py                   # 执行 RAGAS 定量评估
+├── data/                            # 本地笔记与 PDF，不提交到 Git
+└── chroma_db/                       # 本地 Chroma 数据，不提交到 Git
 ```
 
-## 环境准备
+### `config/`：统一配置管理
 
-要求：Python 3.10+、DeepSeek API Key；构建索引和查询均可使用 CPU，但本地 Embedding 在 CUDA 环境下更适合较大语料。
+所有可调参数集中在 `config/settings.py`，包括：
 
-当前依赖尚未完全固化到 `pyproject.toml`。可先安装：
+- DeepSeek API 配置与模型名。
+- 本地 Embedding 模型路径。
+- Chroma 持久化路径与集合名。
+- Markdown 数据路径与输出路径。
+- `chunk_size`、`chunk_overlap`、`retrieval_top_k` 等实验参数。
+
+设计原则是：做 A/B 实验时优先改配置，而不是改业务主链路。
+
+### `experiments/`：实验记录
+
+这里保存阶段验收结果、错误定位过程和指标解释。每次实验至少记录：目标、改动、数据范围、测试集、结果、结论和下一步。
+
+现有记录包括：
+
+- `基线测试结果记录.md`：Embedding、LLM、chunk 与 RAGAS 基线结果。
+- `初期结果评估记录.md`：早期 RAGAS 评估异常与定位过程。
+- `库版本冲突解决流程.md`：RAGAS 与 LangChain 生态兼容问题的处理记录。
+
+### `indexing/`：向量化存储
+
+`indexing/vectorstore.py` 封装 Chroma 的构建与读取。业务脚本不直接操作 Chroma，后续若替换为 Qdrant、Milvus 或 PGVector，优先修改这一层。
+
+### `output/`：统一输出
+
+运行过程产生的测试集和评测结果统一存放在 `output/`，避免结果散落在代码目录中：
+
+- `testset.csv`：RAGAS 根据笔记自动生成的问题、参考上下文和参考答案。
+- `eval_result.csv`：实际 RAG 响应与各项评测分数。
+
+### `scripts/`：可执行实验脚本
+
+`scripts/test/` 保存项目初期的冒烟测试：验证本地 Embedding、DeepSeek API 与完整链路是否可运行。
+
+其余脚本是当前阶段的建库、基线问答、测试集生成和量化评估入口，构成上述三条工作线的执行层。
+
+## 基线建库与生成线
+
+当前基线使用固定长度切分、向量相似度检索和上下文约束生成：
+
+```text
+Markdown documents
+-> DirectoryLoader
+-> RecursiveCharacterTextSplitter
+-> Qwen3-Embedding-0.6B
+-> Chroma
+-> similarity_search(top-k)
+-> DeepSeek
+```
+
+核心入口位于 `scripts/RAG_pipeline.py`：
+
+- `retrieve(question, top_k)`：从 Chroma 取回相关片段。
+- `generate(question, top_k, context)`：将问题与片段组装为 Prompt，调用 DeepSeek。
+- `rag_answer(question, top_k)`：执行完整的检索与生成流程。
+
+Prompt 要求模型只依据参考资料回答；当资料不足时，返回“抱歉，我无法回答这个问题。”
+
+## 测试集与评估线
+
+### 测试集生成
+
+`scripts/TestsetGenerator.py` 使用 RAGAS 基于 Markdown 笔记生成单跳测试问题、参考上下文和参考答案。
+
+项目针对实际运行环境处理了几类兼容问题：
+
+- RAGAS 与新版 `langchain_community` 的导入兼容。
+- Markdown 标题不稳定时的文档节点主题抽取。
+- DeepSeek OpenAI-compatible API 的 `n=1` 限制。
+- 请求超时和并发控制。
+
+这些处理服务于评测链路稳定性，不改变基线 RAG 的查询逻辑。
+
+### RAGAS 评估
+
+`scripts/evalute.py` 会读取测试集，对每个问题调用真实的 `rag_answer()`，再以 DeepSeek 作为评审模型计算：
+
+- Faithfulness：答案是否被检索上下文支持。
+- Answer Relevancy：答案是否直接回应问题。
+- Context Precision with Reference：检索上下文中有用信息的比例。
+- Context Recall：参考答案所需信息是否被召回。
+
+当前代码已经能够生成测试集并完成四项指标评估。具体的样本规模、分数和结论会随语料、评估集版本与实验配置变化，因此以 `experiments/` 中的阶段记录和 `output/` 中对应产物为准，而不在 README 固化单次分数。
+
+## 混合检索生成线
+
+混合检索生成线的职责不是替代基线，而是作为可验证的对照实验：在相同语料、相同测试集和相同评估指标下，判断优化是否真实改善系统。
+
+混合检索、重排、父子分块、句子窗口和摘要检索均属于候选实验，而非默认承诺全部接入。完整的实验顺序、变量控制和验收标准见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
+
+## 快速开始
+
+### 1. 环境要求
+
+- Python 3.10+
+- DeepSeek API Key
+- 本地 Embedding 模型：`Qwen3-Embedding-0.6B`
+- CUDA 为可选项；较大语料推荐使用 GPU
+
+当前依赖尚未完全锁定在 `pyproject.toml`，可先安装：
 
 ```bash
 pip install langchain langchain-community langchain-text-splitters \
@@ -101,7 +195,7 @@ pip install langchain langchain-community langchain-text-splitters \
   openai ragas pandas tqdm torch pydantic-settings python-dotenv
 ```
 
-创建 `.env`：
+### 2. 配置环境变量
 
 ```bash
 cp .env.example .env
@@ -112,94 +206,42 @@ DEEPSEEK_API_KEY=sk-your-key
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 ```
 
-本地 Embedding 模型默认路径为项目同级目录的 `Pre_Models/Qwen3-Embedding-0.6B`，可在 `config/settings.py` 中调整。
+将本地模型放在项目同级目录的 `Pre_Models/Qwen3-Embedding-0.6B`，或在 `config/settings.py` 中修改模型路径。
 
-把 Markdown 笔记放在 `data/notes/`。该目录、Chroma 数据和本地模型均不随 Git 同步，因此远程服务器需要自行准备相同的数据与模型。
+将 Markdown 笔记放入 `data/notes/`。`data/`、`chroma_db/` 和本地模型不随 Git 同步，远程环境需要单独准备。
 
-## 常用命令
+### 3. 执行顺序
 
 ```bash
-# 验证本地 Embedding 的维度与基础语义相似度
+# 验证局部依赖
 python scripts/test/test_embedding.py
-
-# 验证 DeepSeek API 连通性
 python scripts/test/test_llm.py
 
-# 构建或重建 Chroma 索引
+# 建立或更新基线索引
 python scripts/build_vectorstore.py
 
-# 查看 chunk 质量并执行基线冒烟测试
-python scripts/test/test_chunk_size.py
-
-# 单次查询 / 交互式验证 RAG 主链路
+# 验证基线问答
 python scripts/RAG_pipeline.py
 
-# 生成 RAGAS 测试集
+# 生成测试集并完成评测
 python scripts/TestsetGenerator.py
-
-# 运行 RAGAS 评估并写入 output/eval_result.csv
 python scripts/evalute.py
 ```
 
-当 `data/notes/` 有新增或修改时，先重建索引，再生成测试集或执行评测。为了让对比有效，策略实验期间应固定一份测试集；只有语料范围明显变化时再重新生成测试集。
+当笔记内容发生变化时，应先重建索引。进行策略对比时，应尽量固定测试集，避免测试数据变化掩盖策略本身的效果。
 
-## 当前基线配置
+## 当前限制
 
-配置集中在 `config/settings.py`，便于后续 A/B 实验尽量只改参数、不改主流程。
+- 固定长度切分可能截断标题、段落、代码块或指代关系。
+- 纯向量检索会召回语义接近但任务无关的内容。
+- 查询脚本和建库脚本的 CPU/CUDA 设备选择尚未统一。
+- RAGAS 相关依赖存在兼容处理与弃用警告，后续需要锁定依赖版本并逐步移除临时代码。
+- PDF 加载与来源页码引用尚未接入。
 
-```python
-llm_model = "deepseek-v4-flash"
-embedding_model = "../Pre_Models/Qwen3-Embedding-0.6B"
-chunk_size = 500
-chunk_overlap = 50
-retrieval_top_k = 4
-llm_temperature = 0.0
-```
+后续任务、候选方案和阶段验收标准以 [`docs/ROADMAP.md`](docs/ROADMAP.md) 为准。每次完成新能力后，应同时更新路线图中的阶段状态，并将真实实验过程写入 `experiments/`。
 
-已完成的局部验证包括：
+## 开源协作
 
-- Embedding 输出 1024 维向量；语义相近示例相似度为 0.8700，语义无关示例为 0.3364。
-- 单文档基线冒烟测试通过。
-- 7 篇 Markdown 的 chunk 分析得到 102 个 chunk，平均长度 377.7，最大 494，最小 3。
+欢迎围绕检索策略、切分策略、评估方法和可复现实验提出 Issue 或提交改进建议。提交改动时，请说明：改动的目标、所用数据范围、测试集是否固定，以及对 RAGAS 指标和典型案例的影响。
 
-## 已知限制
-
-- 固定长度切分会产生极短 chunk，并可能切断标题、段落、代码块或指代关系。
-- 当前仅使用纯向量相似度检索。随着语料扩大，已观察到 RAG 问题可能召回 Transformer 等语义接近但任务无关的内容。
-- `RAG_pipeline.py` 当前固定使用 CUDA；而索引脚本会自动选择 CUDA/CPU，两者还没有统一。
-- RAGAS 的 LangChain wrapper 仍会给出弃用提示。当前兼容层能运行，但依赖版本需要在后续整理并锁定。
-- 自动生成的问题可能有错别字、覆盖不均等问题；用于趋势比较前应抽样审阅测试集质量。
-- PDF 目录已预留，但尚未进入加载、切分和索引流程。
-
-## 下一步实验路线
-
-1. 检索优化：引入 BM25，与向量召回做混合检索，并加入 Reranker。重点观察 Context Precision 和 Answer Relevancy 是否提升。
-2. 切分优化：按 Markdown 标题和段落结构切分，保留标题上下文，比较极短 chunk 数量与 RAGAS 指标变化。
-3. 可追溯性：把来源文件、标题和片段位置写入 metadata，并在答案中返回来源。
-4. 工程化：统一 CPU/CUDA 设备选择，锁定依赖版本，移除临时兼容代码。
-5. 扩展输入：接入 PDF，保留页码和来源信息。
-6. 交互入口：使用 Streamlit 或 Gradio 展示问题、检索上下文、回答与评测结果。
-
-## 学习日志维护方式
-
-每完成一次实验，在 `experiments/` 新增或更新记录，并同步更新下面的条目：
-
-```markdown
-### YYYY-MM-DD - 实验名称
-- 目标：
-- 改动：
-- 数据与测试集：
-- 结果：
-- 结论：
-- 下一步：
-```
-
-| 日期 | 阶段 | 进展 |
-| --- | --- | --- |
-| 2026-07 | Phase 0 | 跑通 Markdown -> Chroma -> 检索 -> DeepSeek 生成的基线链路。 |
-| 2026-07 | 评测基础设施 | 解决 RAGAS / LangChain 兼容、远程 Markdown 标题与 DeepSeek `n=1` 限制，生成 20 条测试集并完成四项指标评估。 |
-| 下一阶段 | Phase 1 | 以当前 RAGAS 分数为对照，优先验证混合检索、重排与结构化切分。 |
-
-## 结论
-
-项目现在具备了“可运行、可观测、可评估”的最小闭环。当前最有价值的工作不是立刻扩展界面或输入格式，而是先用已有 RAGAS 基线验证检索质量改进：让召回的上下文更相关，再观察生成答案是否随之更贴近问题、更加忠实于资料。
+项目当前尚未声明开源许可证；在复用代码或发布衍生版本前，请先确认许可证安排。
