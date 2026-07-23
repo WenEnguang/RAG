@@ -13,6 +13,16 @@ from langchain_core.output_parsers import StrOutputParser
 
 from config.settings import settings
 from indexing.vectorstore import build_vectorstore
+from scripts.hybrid_search_optimize import build_hybrid_retriever
+import pickle
+
+# 加载切分后的chunk文档列表，用于BM25检索
+try:
+    with open(f"{settings.output_dir}/all_chunks.pkl", "rb") as f:
+        all_chunks = pickle.load(f)
+except FileNotFoundError:
+    print("未找到切分后的chunk文档列表，将使用默认值。")
+    all_chunks = []
 
 # 初始化模型
 embedding_model = HuggingFaceEmbeddings(
@@ -43,16 +53,31 @@ prompt_template = """
     回答：
 """
 
-def retrieve(question:str, top_k:int):
-    """
-    检索相关片段
-        :param question: 用户的提问
-        :param top_k: 检索的片段数量
-        :return: 检索到的相关片段列表
-    """
-    # 检索相关的片段
+# def retrieve(question:str, top_k:int):
+#     """
+#     检索相关片段
+#         :param question: 用户的提问
+#         :param top_k: 检索的片段数量
+#         :return: 检索到的相关片段列表
+#     """
+#     # 检索相关的片段
+#     top_k = top_k or settings.retrieval_top_k  # 限制top_k的最大值
+#     docs = vector_store.similarity_search(query=question, k=top_k)
+#     return [doc.page_content for doc in docs]   # docs是Documents列表对象，返回的是每个Document的page_content属性，即文本内容，剩下的元数据属性暂时不需要
+
+def hybird_retriever(question:str, 
+                    top_k:int,
+                    use_hybrid:bool=False,
+                    all_chunks:list=None,
+):
     top_k = top_k or settings.retrieval_top_k  # 限制top_k的最大值
-    docs = vector_store.similarity_search(query=question, k=top_k)
+    if use_hybrid:
+        # 构建混合检索器
+        hybird_retriever = build_hybrid_retriever(vector_store, all_chunks, topk=top_k)
+        docs = hybird_retriever.invoke(question)
+    else:
+        # 仅使用向量检索
+        docs = vector_store.similarity_search(query=question, k=top_k)
     return [doc.page_content for doc in docs]   # docs是Documents列表对象，返回的是每个Document的page_content属性，即文本内容，剩下的元数据属性暂时不需要
 
 def generate(question:str, top_k:int = None, context:list = None):
@@ -76,9 +101,9 @@ def generate(question:str, top_k:int = None, context:list = None):
     # 这里可以查看response的结构，通常是一个字典，里面包含了生成的文本、token使用情况等信息
     return response.choices[0].message.content.strip()  # 返回LLM生成的答案
 
-def rag_answer(question:str, top_k:int = None):
+def rag_answer(question:str, top_k:int = None,use_hybrid:bool=False, all_chunks:list=None):
     """完整RAG查询：检索 + 生成，一次调用拿到全部结果"""
-    contexts = retrieve(question, top_k)    # 检索内容
+    contexts = hybird_retriever(question, top_k, use_hybrid=use_hybrid, all_chunks=all_chunks)    # 检索内容
     answer = generate(question, top_k, contexts)  # 生成答案
     return {
         "question": question,

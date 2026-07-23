@@ -2,15 +2,19 @@ import os
 import sys
 import types
 
-# ---- 修补 ragas 对已废弃路径 langchain_community.chat_models.vertexai 的依赖 ----
-try:
-    import langchain_community.chat_models.vertexai
-except ModuleNotFoundError:
-    from langchain_google_vertexai import ChatVertexAI
-    shim = types.ModuleType("langchain_community.chat_models.vertexai")
-    shim.ChatVertexAI = ChatVertexAI
-    sys.modules["langchain_community.chat_models.vertexai"] = shim
-# ---- 修补结束 ----
+
+# --- ragas 0.4.3+ 的已知bug临时补丁 ---
+# ragas/llms/base.py 内部无条件导入了 langchain_community.chat_models.vertexai.ChatVertexAI，
+# 这个模块在新版langchain_community(1.x系)里已被彻底移除。
+# 我们的项目完全不用VertexAI，这里手动伪造一个空模块骗过导入检查即可，不影响任何实际功能。
+# 等ragas官方修复此问题后，可以删掉这段补丁。
+_fake_module = types.ModuleType("langchain_community.chat_models.vertexai")
+class ChatVertexAI:  # 占位符，永远不会被真正调用
+    pass
+_fake_module.ChatVertexAI = ChatVertexAI
+sys.modules["langchain_community.chat_models.vertexai"] = _fake_module
+# --- 补丁结束 ---
+
 
 from config.settings import settings
 from dotenv import load_dotenv, find_dotenv

@@ -6,6 +6,8 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from config.settings import settings
 from indexing.vectorstore import build_vectorstore as save_to_chroma    
 
+import pickle
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 def build_index():
@@ -35,6 +37,12 @@ def build_index():
     )
     vectorstore = save_to_chroma(chunks, embeddings)
     print(f"  索引建立完成，collection={settings.chroma_collection_name}")
+
+    print(f"补充：将切分结果另存一份到本地到{settings.output_dir}/all_chunks.pkl，后续BM25检索会用到")
+
+    # 将切分结果保存到本地
+    with open(f"{settings.output_dir}/all_chunks.pkl", "wb") as f:
+        pickle.dump(chunks, f)
 
 if __name__ == "__main__":
     build_index()
