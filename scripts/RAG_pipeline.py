@@ -73,8 +73,9 @@ def hybird_retriever(question:str,
     top_k = top_k or settings.retrieval_top_k  # 限制top_k的最大值
     if use_hybrid:
         # 构建混合检索器
-        hybird_retriever = build_hybrid_retriever(vector_store, all_chunks, topk=top_k)
+        hybird_retriever = build_hybrid_retriever(vector_store, all_chunks, top_k=top_k)
         docs = hybird_retriever.invoke(question)
+        docs = docs[:top_k]  # 取前top_k个结果,融合后截断，保持候选总数和baseline一致，方便对比
     else:
         # 仅使用向量检索
         docs = vector_store.similarity_search(query=question, k=top_k)
@@ -114,7 +115,7 @@ def rag_answer(question:str, top_k:int = None,use_hybrid:bool=False, all_chunks:
 
 if __name__ == "__main__":
     # 测试RAG查询
-    question = "解释以下RAG？"
+    question = "请问线甘是什么？它怎么让人感到疲劳的？"
     result = rag_answer(question)
     print("问题:", result["question"])
     print("检索到的相关片段:")
