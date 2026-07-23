@@ -10,7 +10,6 @@ import ast
 import pandas as pd
 from tqdm import tqdm
 
-
 import sys
 import types
 
@@ -34,6 +33,7 @@ from ragas.llms import LangchainLLMWrapper
 from ragas.metrics import Faithfulness, ResponseRelevancy, LLMContextPrecisionWithReference, LLMContextRecall
 from langchain_openai import ChatOpenAI
 from ragas.embeddings import LangchainEmbeddingsWrapper
+from RAG_pipeline import rag_answer, all_chunks
 
 # ---- 1. 读取testset ----
 testset_path = os.path.join(settings.output_dir, "testset.csv")
@@ -43,9 +43,14 @@ testset_df = pd.read_csv(testset_path)
 testset_df["reference_contexts"] = testset_df["reference_contexts"].apply(ast.literal_eval)
 
 # ---- 2. 逐条跑RAG主链路，收集真实的检索结果和生成答案 ----
+USE_HYBIRD = True  # 是否使用hybrid检索（向量+BM25）模式
 records = []
 for _, row in tqdm(testset_df.iterrows(), total=len(testset_df), desc="跑RAG主链路"):
-    result = rag_answer(row["user_input"])
+    result = rag_answer(
+        question=row["user_input"],
+        use_hybrid=USE_HYBIRD,
+        all_chunks=all_chunks
+    )
     records.append({
         "user_input": row["user_input"],
         "retrieved_contexts": result["retrieved_contexts"],   # 你的系统实际检索到的
@@ -98,7 +103,8 @@ result = evaluate(
 
 # ---- 5. 保存结果，方便和下一次改配置后的结果做对比 ----
 result_df = result.to_pandas()
-output_path = os.path.join(settings.output_dir, "eval_result.csv")
+suffix = "hybird" if USE_HYBIRD else "baseline"
+output_path = os.path.join(settings.output_dir, f"eval_result_{suffix}.csv")
 result_df.to_csv(output_path, index=False)
 
 print("\n==== 评测汇总 ====")
