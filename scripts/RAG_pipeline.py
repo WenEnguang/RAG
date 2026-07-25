@@ -69,11 +69,13 @@ def hybird_retriever(question:str,
                     top_k:int,
                     use_hybrid:bool=False,
                     all_chunks:list=None,
+                    vector_weight:float=0.5,
+                    bm25_weight:float=0.5
 ):
     top_k = top_k or settings.retrieval_top_k  # 限制top_k的最大值
     if use_hybrid:
         # 构建混合检索器
-        hybird_retriever = build_hybrid_retriever(vector_store, all_chunks, top_k=top_k)
+        hybird_retriever = build_hybrid_retriever(vector_store, all_chunks, top_k=top_k,vector_weight=vector_weight, bm25_weight=bm25_weight)
         docs = hybird_retriever.invoke(question)
         docs = docs[:top_k]  # 取前top_k个结果,融合后截断，保持候选总数和baseline一致，方便对比
     else:
@@ -102,9 +104,11 @@ def generate(question:str, top_k:int = None, context:list = None):
     # 这里可以查看response的结构，通常是一个字典，里面包含了生成的文本、token使用情况等信息
     return response.choices[0].message.content.strip()  # 返回LLM生成的答案
 
-def rag_answer(question:str, top_k:int = None,use_hybrid:bool=False, all_chunks:list=None):
+def rag_answer(question:str, top_k:int = None,use_hybrid:bool=False, all_chunks:list=None,
+               vector_weight:float=0.5, bm25_weight:float=0.5):
     """完整RAG查询：检索 + 生成，一次调用拿到全部结果"""
-    contexts = hybird_retriever(question, top_k, use_hybrid=use_hybrid, all_chunks=all_chunks)    # 检索内容
+    contexts = hybird_retriever(question, top_k, use_hybrid=use_hybrid, all_chunks=all_chunks,
+                                vector_weight=vector_weight, bm25_weight=bm25_weight)    # 检索内容
     answer = generate(question, top_k, contexts)  # 生成答案
     return {
         "question": question,

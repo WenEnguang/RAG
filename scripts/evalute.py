@@ -44,12 +44,16 @@ testset_df["reference_contexts"] = testset_df["reference_contexts"].apply(ast.li
 
 # ---- 2. 逐条跑RAG主链路，收集真实的检索结果和生成答案 ----
 USE_HYBIRD = True  # 是否使用hybrid检索（向量+BM25）模式
+VECTOR_WEIGHT = 0.7  # 向量检索结果的权重
+BM25_WEIGHT = 0.3    # BM25检索结果的权重
 records = []
 for _, row in tqdm(testset_df.iterrows(), total=len(testset_df), desc="跑RAG主链路"):
     result = rag_answer(
         question=row["user_input"],
         use_hybrid=USE_HYBIRD,
-        all_chunks=all_chunks
+        all_chunks=all_chunks,
+        vector_weight=VECTOR_WEIGHT,
+        bm25_weight=BM25_WEIGHT
     )
     records.append({
         "user_input": row["user_input"],
@@ -103,7 +107,8 @@ result = evaluate(
 
 # ---- 5. 保存结果，方便和下一次改配置后的结果做对比 ----
 result_df = result.to_pandas()
-suffix = "hybird" if USE_HYBIRD else "baseline"
+# suffix = "hybird" if USE_HYBIRD else "baseline"
+suffix = f"hybird_v{VECTOR_WEIGHT}_b{BM25_WEIGHT}" if USE_HYBIRD else "baseline"
 output_path = os.path.join(settings.output_dir, f"eval_result_{suffix}.csv")
 result_df.to_csv(output_path, index=False)
 
