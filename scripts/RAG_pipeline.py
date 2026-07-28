@@ -14,6 +14,7 @@ from langchain_core.output_parsers import StrOutputParser
 from config.settings import settings
 from indexing.vectorstore import build_vectorstore
 from scripts.hybrid_search_optimize import build_hybrid_retriever
+from scripts.build_parent_children_index import get_parent_child_retriever  # 新增：父子分块
 import pickle
 
 # 加载切分后的chunk文档列表，用于BM25检索
@@ -37,6 +38,10 @@ vector_store = Chroma(
     collection_name = settings.chroma_collection_name,  # 收集名称，作用是区分不同的向量集合
     embedding_function = embedding_model,       # 使用的嵌入模型
 )
+
+# 初始化父子分块检索器（独立的collection + 独立的docstore,只加载不重建索引）
+# for_indexing=False：查询阶段不需要parent_splitter，索引已经在build_parent_child_index.py里建好了
+parent_child_retriever = get_parent_child_retriever(embeddings=embedding_model, for_indexing=False)
 
 # 初始化LLM，后期用于生成答案
 llm_client = OpenAI(
@@ -65,22 +70,30 @@ prompt_template = """
 #     docs = vector_store.similarity_search(query=question, k=top_k)
 #     return [doc.page_content for doc in docs]   # docs是Documents列表对象，返回的是每个Document的page_content属性，即文本内容，剩下的元数据属性暂时不需要
 
-def hybird_retriever(question:str, 
+def hybird_retriever(question:str,
                     top_k:int,
                     use_hybrid:bool=False,
                     all_chunks:list=None,
                     vector_weight:float=0.5,
-                    bm25_weight:float=0.5
+                    bm25_weight:float=0.5,
+                    use_parent_child:bool=False,
 ):
-    top_k = top_k or settings.retrieval_top_k  # 限制top_k的最大值
-    if use_hybrid:
-        # 构建混合检索器
-        hybird_retriever = build_hybrid_retriever(vector_store, all_chunks, top_k=top_k,vector_weight=vector_weight, bm25_weight=bm25_weight)
+    top_k = top_k or settings.retrieval_top_k
+
+    # 使用父子分块检索器
+    if use_parent_child:
+        docs = parent_child_retriever.invoke(question)
+        docs = docs[:top_k]
+    # 使用混合检索器（向量+BM25）
+    elif use_hybrid:
+        hybird_retriever = build_hybrid_retriever(vector_store, all_chunks, top_k=top_k,
+                                                    vector_weight=vector_weight, bm25_weight=bm25_weight)
         docs = hybird_retriever.invoke(question)
-        docs = docs[:top_k]  # 取前top_k个结果,融合后截断，保持候选总数和baseline一致，方便对比
+        docs = docs[:top_k]
     else:
-        # 仅使用向量检索
+        # 纯向量检索
         docs = vector_store.similarity_search(query=question, k=top_k)
+
     return [doc.page_content for doc in docs]   # docs是Documents列表对象，返回的是每个Document的page_content属性，即文本内容，剩下的元数据属性暂时不需要
 
 def generate(question:str, top_k:int = None, context:list = None):
@@ -105,10 +118,11 @@ def generate(question:str, top_k:int = None, context:list = None):
     return response.choices[0].message.content.strip()  # 返回LLM生成的答案
 
 def rag_answer(question:str, top_k:int = None,use_hybrid:bool=False, all_chunks:list=None,
-               vector_weight:float=0.5, bm25_weight:float=0.5):
+               vector_weight:float=0.5, bm25_weight:float=0.5,use_parent_child:bool=False):
     """完整RAG查询：检索 + 生成，一次调用拿到全部结果"""
     contexts = hybird_retriever(question, top_k, use_hybrid=use_hybrid, all_chunks=all_chunks,
-                                vector_weight=vector_weight, bm25_weight=bm25_weight)    # 检索内容
+                                vector_weight=vector_weight, bm25_weight=bm25_weight,
+                                use_parent_child=use_parent_child)    # 检索内容
     answer = generate(question, top_k, contexts)  # 生成答案
     return {
         "question": question,
@@ -118,12 +132,15 @@ def rag_answer(question:str, top_k:int = None,use_hybrid:bool=False, all_chunks:
     }
 
 if __name__ == "__main__":
-    # 测试RAG查询
-    question = "请问线甘是什么？它怎么让人感到疲劳的？"
+    # 测试RAG查询：分别跑一次纯向量和父子分块，直观对比检索到的内容长度差异
+    question = "请问RAG的核心思路是什么？"
+ 
+    print("===== 纯向量检索 =====")
     result = rag_answer(question)
-    print("问题:", result["question"])
-    print("检索到的相关片段:")
-    print("检索到的相关片段数量:", len(result["retrieved_contexts"]))
-    for i, context in enumerate(result["retrieved_contexts"], 1):
-        print(f"{i}. {context}")
-    print("生成的答案:", result["answer"])
+    for i, ctx in enumerate(result["retrieved_contexts"], 1):
+        print(f"[{i}] 长度{len(ctx)}字符: {ctx[:80]}...")
+ 
+    print("\n===== 父子分块检索 =====")
+    result_pc = rag_answer(question, use_parent_child=True)
+    for i, ctx in enumerate(result_pc["retrieved_contexts"], 1):
+        print(f"[{i}] 长度{len(ctx)}字符: {ctx[:80]}...")
