@@ -1,8 +1,9 @@
 """
 评测脚本：拿testset.csv里的问题，逐条跑你的RAG主链路，收集实际的检索结果和生成答案，
 再用ragas打分，量化你的RAG系统在retrieval和generation两端的表现。
-每次改config.py里的参数（chunk_size, retrieval_top_k...）后重跑一遍这个脚本，
-对比分数变化，就是最直接的A/B实验方式。
+
+本版新增：结构化生成模式下的引用有效性统计（citation_valid相关），
+这部分是ragas无法评估的自定义指标，单独统计、单独展示。
 """
 import os
 import ast
@@ -14,18 +15,14 @@ import sys
 import types
 
 # --- ragas 0.4.3+ 的已知bug临时补丁 ---
-# ragas/llms/base.py 内部无条件导入了 langchain_community.chat_models.vertexai.ChatVertexAI，
-# 这个模块在新版langchain_community(1.x系)里已被彻底移除。
-# 我们的项目完全不用VertexAI，这里手动伪造一个空模块骗过导入检查即可，不影响任何实际功能。
-# 等ragas官方修复此问题后，可以删掉这段补丁。
 _fake_module = types.ModuleType("langchain_community.chat_models.vertexai")
-class ChatVertexAI:  # 占位符，永远不会被真正调用
+class ChatVertexAI:
     pass
 _fake_module.ChatVertexAI = ChatVertexAI
 sys.modules["langchain_community.chat_models.vertexai"] = _fake_module
 # --- 补丁结束 ---
 from config.settings import settings
-from RAG_pipeline import rag_answer,embedding_model
+from RAG_pipeline import rag_answer, embedding_model, all_chunks
 
 from ragas.run_config import RunConfig
 from ragas import EvaluationDataset, evaluate
@@ -33,42 +30,49 @@ from ragas.llms import LangchainLLMWrapper
 from ragas.metrics import Faithfulness, ResponseRelevancy, LLMContextPrecisionWithReference, LLMContextRecall
 from langchain_openai import ChatOpenAI
 from ragas.embeddings import LangchainEmbeddingsWrapper
-from RAG_pipeline import rag_answer, all_chunks
 
 # ---- 1. 读取testset ----
 testset_path = os.path.join(settings.output_dir, "testset.csv")
 testset_df = pd.read_csv(testset_path)
-
-# reference_contexts 列存的是字符串形式的list，读出来要转回真正的list
 testset_df["reference_contexts"] = testset_df["reference_contexts"].apply(ast.literal_eval)
 
-# ---- 2. 逐条跑RAG主链路，收集真实的检索结果和生成答案 ----
-USE_HYBIRD = False  # 是否使用hybrid检索（向量+BM25）模式
-VECTOR_WEIGHT = 0.7  # 向量检索结果的权重
-BM25_WEIGHT = 0.3    # BM25检索结果的权重
-USE_PARENT_CHILD = True  # 是否使用父子分块检索
+# ---- 2. 本次实验配置 ----
+USE_HYBIRD = False
+USE_PARENT_CHILD = True   # 复用目前验证过最优的检索方式
+USE_STRUCTURED = True     # 本次要测试的新变量：结构化生成
+
 records = []
+citation_stats = []  # 单独收集引用相关的自定义统计，不进ragas
+
 for _, row in tqdm(testset_df.iterrows(), total=len(testset_df), desc="跑RAG主链路"):
     result = rag_answer(
         question=row["user_input"],
         use_hybrid=USE_HYBIRD,
         all_chunks=all_chunks,
-        vector_weight=VECTOR_WEIGHT,
-        bm25_weight=BM25_WEIGHT,
-        use_parent_child=USE_PARENT_CHILD
+        use_parent_child=USE_PARENT_CHILD,
+        use_structured=USE_STRUCTURED,
     )
     records.append({
         "user_input": row["user_input"],
-        "retrieved_contexts": result["retrieved_contexts"],   # 你的系统实际检索到的
-        "response": result["response"],                       # 你的系统实际生成的
-        "reference": row["reference"],                         # testset里的标准答案
-        "reference_contexts": row["reference_contexts"],       # testset里的标准检索片段
+        "retrieved_contexts": result["retrieved_contexts"],
+        "response": result["response"],
+        "reference": row["reference"],
+        "reference_contexts": row["reference_contexts"],
     })
+
+    if USE_STRUCTURED:
+        citation_stats.append({
+            "user_input": row["user_input"],
+            "cited_indices": result.get("cited_indices"),
+            "is_answerable": result.get("is_answerable"),
+            "citation_valid": result.get("citation_valid"),
+            "raw_parse_failed": result.get("raw_parse_failed"),
+        })
 
 evaluation_dataset = EvaluationDataset.from_list(records)
 print(f"测评数据集：{evaluation_dataset}")
 
-# ---- 3. 配置评测用的LLM（用DeepSeek当裁判）和嵌入模型 ----
+# ---- 3. 配置评测用的LLM和嵌入模型 ----
 evaluator_llm = LangchainLLMWrapper(
     ChatOpenAI(
         api_key=settings.deepseek_api_key,
@@ -76,23 +80,12 @@ evaluator_llm = LangchainLLMWrapper(
         model=settings.llm_model,
         temperature=0,
     ),
-    bypass_n = True, 
+    bypass_n=True,
 )
-evaluator_embeddings = LangchainEmbeddingsWrapper(
-    embedding_model
-)
-# embedding_model = HuggingFaceEmbeddings(
-#     model_name = settings.embedding_model,   # 本地嵌入模型
-#     model_kwargs = {"device": "cuda"},        # 没有GPU就改成 "cpu"
-#     encode_kwargs = {"normalize_embeddings": True},
-# )
+evaluator_embeddings = LangchainEmbeddingsWrapper(embedding_model)
 
-# ---- 4. 跑评测 ----
-# Faithfulness / ResponseRelevancy 看生成端；ContextPrecision / ContextRecall 看检索端
-my_config = RunConfig(
-    timeout=300,
-    max_workers=4,
-)
+# ---- 4. 跑ragas评测 ----
+my_config = RunConfig(timeout=300, max_workers=4)
 result = evaluate(
     dataset=evaluation_dataset,
     metrics=[
@@ -107,18 +100,37 @@ result = evaluate(
     raise_exceptions=False,
 )
 
-# ---- 5. 保存结果，方便和下一次改配置后的结果做对比 ----
+# ---- 5. 保存ragas结果 ----
 result_df = result.to_pandas()
-# suffix = "hybird" if USE_HYBIRD else "baseline"
-if USE_PARENT_CHILD:
+if USE_STRUCTURED:
+    suffix = "parent_child_structured" if USE_PARENT_CHILD else "structured"
+elif USE_PARENT_CHILD:
     suffix = "parent_child"
 elif USE_HYBIRD:
-    suffix = f"hybird_v{VECTOR_WEIGHT}_b{BM25_WEIGHT}"
+    suffix = "hybird"
 else:
     suffix = "baseline"
 output_path = os.path.join(settings.output_dir, f"eval_result_{suffix}.csv")
 result_df.to_csv(output_path, index=False)
 
-print("\n==== 评测汇总 ====")
+print("\n==== ragas评测汇总 ====")
 print(result)
 print(f"\n详细结果已保存至: {output_path}")
+
+# ---- 6. 单独汇总引用有效性统计（不属于ragas，自定义分析） ----
+if USE_STRUCTURED:
+    citation_df = pd.DataFrame(citation_stats)
+    citation_output_path = os.path.join(settings.output_dir, f"citation_stats_{suffix}.csv")
+    citation_df.to_csv(citation_output_path, index=False)
+
+    total = len(citation_df)
+    valid_citation_rate = citation_df["citation_valid"].sum() / total
+    parse_fail_rate = citation_df["raw_parse_failed"].sum() / total
+    answerable_count = citation_df["is_answerable"].sum()
+
+    print("\n==== 引用有效性统计（自定义，非ragas指标） ====")
+    print(f"总问题数: {total}")
+    print(f"引用编号有效率: {valid_citation_rate:.4f}（LLM给出的引用编号在合法范围内的比例）")
+    print(f"JSON解析失败率: {parse_fail_rate:.4f}（越低越好，说明结构化输出稳定性）")
+    print(f"判定为'可回答'的问题数: {answerable_count} / {total}")
+    print(f"详细引用统计已保存至: {citation_output_path}")
