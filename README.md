@@ -37,7 +37,7 @@
 | RAGAS 测试集生成与四项指标评测 | 已完成 | 测试集、逐样本结果和排错过程均已保留 |
 | 中文 BM25 + 混合检索 | 已实现并完成对照 | 已加入 `jieba` 中文分词；当前小规模语料下未形成稳定的综合优势 |
 | 父子分块检索 | 已实现并完成对照 | 使用小型 child chunk 检索，返回所属 parent chunk；当前综合实验表现最好 |
-| Prompt 生成约束实验 | 进行中 | 目标是改善 Faithfulness、Answer Relevancy 和拒答行为 |
+| Prompt 生成约束实验 | 已实现 | 目标是改善 Faithfulness、Answer Relevancy 和拒答行为 |
 | PDF、Rerank、元数据过滤、来源引用 | 规划中 | 具体方向与验收条件见路线图 |
 
 ### 当前推荐方式
@@ -265,12 +265,12 @@ retrieval_top_k = 4
 
 当前结果基于固定的 **20 条 RAGAS 合成测试样本**。所有数字只适用于当前语料、测试集、Embedding、生成模型、评测模型和参数配置。
 
-| 指标 | Vector Baseline | Hybrid 0.5/0.5 | Hybrid 0.7/0.3 | Parent-child |
-| --- | ---: | ---: | ---: | ---: |
-| Faithfulness | 0.8172 | 0.8137 | **0.8375** | 0.8305 |
-| Answer Relevancy | 0.7979 | 0.7714 | 0.7374 | **0.8020** |
-| Context Precision | 0.8444 | 0.8788 | 0.8640 | **0.9737** |
-| Context Recall | 0.9500 | 0.9298 | 0.9333 | **1.0000** |
+| 指标 | Vector Baseline | Hybrid 0.5/0.5 | Hybrid 0.7/0.3 | Parent-child | structred_prompt |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Faithfulness | 0.8172 | 0.8137 | 0.8375 | 0.8305 | **0.8922** |
+| Answer Relevancy | 0.7979 | 0.7714 | 0.7374 | **0.8020** | 0.7439 |
+| Context Precision | 0.8444 | 0.8788 | 0.8640 | **0.9737** | **0.9737** |
+| Context Recall | 0.9500 | 0.9298 | 0.9333 | **1.0000** | 0.9900 |
 
 ### 结果解读
 
@@ -297,7 +297,6 @@ output/eval_result_baseline.csv
 
 父子分块取得了最高的：
 
-- Answer Relevancy：`0.8020`
 - Context Precision：`0.9737`
 - Context Recall：`1.0000`
 
@@ -321,6 +320,18 @@ output/eval_result_baseline.csv
 ```text
 experiments/parent_child_chunk检索结果记录.md
 ```
+
+#### 结构化生成优化
+结构化生成目前取得了最好faithfilness的和次好的context recall：
+- Faithfulness: 0.8922
+- Context Recall: 0.9900
+
+从目前的结果显示，`faithfulness`是目前几轮评估中最高的，引用的资料是可信的——结构化输出在这方面是增加了可信度的；
+
+```text
+experiments/结构化生成优化结果记录.md
+```
+
 
 ---
 
