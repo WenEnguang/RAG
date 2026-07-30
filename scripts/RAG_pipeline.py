@@ -6,6 +6,7 @@ from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_openai import ChatOpenAI
 from openai import OpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
@@ -15,7 +16,8 @@ from config.settings import settings
 from indexing.vectorstore import build_vectorstore
 from scripts.hybrid_search_optimize import build_hybrid_retriever
 from scripts.build_parent_children_index import get_parent_child_retriever
-from scripts.structured_generate import generate_structured  # 新增：结构化生成
+from scripts.structured_generate import generate_structured  
+from scripts.query_rewrite import build_multi_query_retriever
 import pickle
 
 # 加载切分后的chunk文档列表，用于BM25检索
@@ -52,6 +54,13 @@ llm_client = OpenAI(
     base_url = settings.deepseek_base_url
 )
 
+# LangChain封装的LLM，专供MultiQueryRetriever使用
+langchain_llm = ChatOpenAI(
+    api_key = settings.deepseek_api_key,
+    base_url = settings.deepseek_base_url,
+    model = settings.llm_model,
+    temperature = settings.llm_temperature,
+)
 
 # prompt模板（非结构化模式使用，结构化模式用的是structured_generate.py里独立的模板）
 prompt_template = """
@@ -69,10 +78,27 @@ def hybird_retriever(
         all_chunks:list=None,
         vector_weight:float=0.7,
         bm25_weight:float=0.3,
-        use_parent_child:bool=False
+        use_parent_child:bool=False,
+        use_multi_query:bool=False,
 ):
+    '''
+    统一检索入口：根据参数选择不同的检索方式
+        use_multi_query:
+            True时：先使用简单返回时验证一下——以父子分块检索器作为改为后每个子查询
+            的底层检索器（因为父子分块是目前验证过的最优检索方式），
+            再用MultiQueryRetriever做查询改写，最后合并去重返回。
+    '''
+    
     top_k = top_k or settings.retrieval_top_k  # 限制top_k的最大值
-    if use_parent_child:
+    if use_multi_query:
+        # 使用查询改写检索器
+        mq_retriever = build_multi_query_retriever(
+            base_retriever=parent_child_retriever,
+            llm=langchain_llm
+        )
+        docs = mq_retriever.invoke(question)
+        docs = docs[:top_k]  # 只取前top_k个结果
+    elif use_parent_child:
         # 使用父子分块检索器
         docs = parent_child_retriever.invoke(question)
         docs = docs[:top_k]  # 只取前top_k个结果
@@ -110,7 +136,7 @@ def generate(question:str,top_k:int=None,context:list=None):
 def rag_answer(question:str, top_k:int = None, use_hybrid:bool=False, 
                all_chunks:list=None,vector_weight:float=0.7, 
                bm25_weight:float=0.3, use_parent_child:bool=False,
-                use_structured:bool=False):
+                use_structured:bool=False,use_multi_query:bool=False):
     """
     完整RAG查询：检索 + 生成，一次调用拿到全部结果
  
@@ -123,7 +149,7 @@ def rag_answer(question:str, top_k:int = None, use_hybrid:bool=False,
     contexts = hybird_retriever(
         question, top_k, use_hybrid=use_hybrid, all_chunks=all_chunks,
         vector_weight=vector_weight, bm25_weight=bm25_weight,
-        use_parent_child=use_parent_child,
+        use_parent_child=use_parent_child, use_multi_query=use_multi_query,
     )
     if use_structured:
         structured_result = generate_structured(
@@ -150,26 +176,19 @@ def rag_answer(question:str, top_k:int = None, use_hybrid:bool=False,
         }
 
 if __name__ == "__main__":
-    # 对比测试：同一个问题，分别看非结构化和结构化两种模式的输出差异
-    question = "请问RAG的核心思路是什么？"
+    # 对比测试：父子分块 vs 查询改写(基于父子分块)，看检索到的内容数量/多样性差异
+    question = "那个亚马逊雨林 它是不是在巴西那边啊 那它到底有多大"  # 用一个口语化问题测试改写效果
  
-    print("===== 非结构化生成 =====")
-    result = rag_answer(question)
-    print(result["answer"])
+    print("===== 父子分块检索（不改写） =====")
+    result = rag_answer(question, use_parent_child=True)
+    print(f"检索到 {len(result['retrieved_contexts'])} 条")
+    for i, ctx in enumerate(result["retrieved_contexts"], 1):
+        print(f"[{i}] {ctx[:60]}...")
  
-    print("\n===== 结构化生成 =====")
-    result_s = rag_answer(question, use_structured=True)
-    print("回答:", result_s["answer"])
-    print("引用编号:", result_s["cited_indices"])
-    print("是否可回答:", result_s["is_answerable"])
-    print("引用是否有效:", result_s["citation_valid"])
-    print("JSON解析是否失败:", result_s["raw_parse_failed"])
- 
-    # 顺手测一个会触发"资料不足以回答"的问题，看拒答场景下结构化输出的表现
-    print("\n===== 结构化生成（预期拒答的问题） =====")
-    bad_question = "请问线甘是什么？它怎么让人感到疲劳的？"
-    result_bad = rag_answer(bad_question, use_structured=True)
-    print("回答:", result_bad["answer"])
-    print("引用编号:", result_bad["cited_indices"])
-    print("是否可回答:", result_bad["is_answerable"])
-    print("引用是否有效:", result_bad["citation_valid"])
+    print("\n===== 查询改写 + 父子分块检索 =====")
+    result_mq = rag_answer(question, use_multi_query=True)
+    print(f"检索到 {len(result_mq['retrieved_contexts'])} 条")
+    for i, ctx in enumerate(result_mq["retrieved_contexts"], 1):
+        print(f"[{i}] {ctx[:60]}...")
+
+    
