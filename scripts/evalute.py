@@ -38,8 +38,9 @@ testset_df["reference_contexts"] = testset_df["reference_contexts"].apply(ast.li
 
 # ---- 2. 本次实验配置 ----
 USE_HYBIRD = False
-USE_PARENT_CHILD = True   # 复用目前验证过最优的检索方式
-USE_STRUCTURED = True     # 本次要测试的新变量：结构化生成
+USE_PARENT_CHILD = False   # 父子分块检索方式
+USE_STRUCTURED = True     # 结构化生成
+USE_SELF_QUERY= True   # 元数据检索
 
 records = []
 citation_stats = []  # 单独收集引用相关的自定义统计，不进ragas
@@ -51,6 +52,7 @@ for _, row in tqdm(testset_df.iterrows(), total=len(testset_df), desc="跑RAG主
         all_chunks=all_chunks,
         use_parent_child=USE_PARENT_CHILD,
         use_structured=USE_STRUCTURED,
+        use_self_query=USE_SELF_QUERY,
     )
     records.append({
         "user_input": row["user_input"],
@@ -103,7 +105,10 @@ result = evaluate(
 # ---- 5. 保存ragas结果 ----
 result_df = result.to_pandas()
 if USE_STRUCTURED:
-    suffix = "parent_child_structured" if USE_PARENT_CHILD else "structured"
+    if USE_SELF_QUERY:
+        suffix = "self_query_parent_structured"
+    else:
+        suffix = "parent_child_structured" if USE_PARENT_CHILD else "structured"
 elif USE_PARENT_CHILD:
     suffix = "parent_child"
 elif USE_HYBIRD:
