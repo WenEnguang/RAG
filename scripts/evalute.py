@@ -41,6 +41,7 @@ USE_HYBIRD = False
 USE_PARENT_CHILD = False   # 父子分块检索方式
 USE_STRUCTURED = True     # 结构化生成
 USE_SELF_QUERY= True   # 元数据检索
+USE_RERANK = True      # rerank精排
 
 records = []
 citation_stats = []  # 单独收集引用相关的自定义统计，不进ragas
@@ -53,6 +54,7 @@ for _, row in tqdm(testset_df.iterrows(), total=len(testset_df), desc="跑RAG主
         use_parent_child=USE_PARENT_CHILD,
         use_structured=USE_STRUCTURED,
         use_self_query=USE_SELF_QUERY,
+        use_rerank=USE_RERANK,
     )
     records.append({
         "user_input": row["user_input"],
@@ -106,7 +108,7 @@ result = evaluate(
 result_df = result.to_pandas()
 if USE_STRUCTURED:
     if USE_SELF_QUERY:
-        suffix = "self_query_parent_structured"
+        suffix = "self_query_parent_rerank_structured"
     else:
         suffix = "parent_child_structured" if USE_PARENT_CHILD else "structured"
 elif USE_PARENT_CHILD:
