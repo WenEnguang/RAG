@@ -2,7 +2,7 @@
 
 一个面向个人 Markdown 笔记的本地 RAG 实验项目。
 
-这个仓库的重点不是快速搭建问答界面，而是记录一条可运行、可评测、可对照、可复盘的 RAG 实践路径：从向量检索基线出发，逐步验证混合检索、父子分块、结构化生成与元数据检索，并保留每一步的实验记录与反例。
+这个仓库的重点不是快速搭建问答界面，而是记录一条可运行、可评测、可对照、可复盘的 RAG 实践路径：从向量检索基线出发，逐步验证混合检索、父子分块、结构化生成、元数据检索与 Rerank 精排，并保留每一步的实验记录与反例。
 
 > 本项目仍在迭代。README 只描述已实现和已验证的工作；详细过程见 [`experiments/`](experiments/)，后续计划见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
 
@@ -25,6 +25,7 @@
 | 结构化生成 | JSON 输出、回答性判断、引用编号与本地校验 | 提升回答可核查性，并改善 Faithfulness |
 | 元数据检索 | 自动主题标签、修改日期、SelfQueryRetriever 过滤 | 与父子分块结合后取得当前最佳 Faithfulness 与 Precision |
 | 查询改写 | MultiQueryRetriever 生成多视角查询 | 当前小语料下未观察到稳定增益，保留为候选策略 |
+| Rerank 精排 | Cross-Encoder（`bge-reranker-base`）对候选二次打分 | 叠加在当前最佳组合上未带来提升，判定为负例，见下文分析 |
 
 ## 系统流程
 
@@ -40,10 +41,11 @@ flowchart LR
     M --> H[BM25 + Vector]
     M --> P[Parent-Child]
     M --> S[Metadata Filter + Parent Mapping]
-    V --> G[Generate]
-    H --> G
-    P --> G
-    S --> G
+    V --> RR{Rerank Optional}
+    H --> RR
+    P --> RR
+    S --> RR
+    RR --> G[Generate]
     G --> O[Answer / JSON Citations]
 
     A --> T[RAGAS Testset]
@@ -103,18 +105,24 @@ Markdown
 
 随后在构建父子分块索引时将 `primary_tag` 与 `modified_date` 写入每个 chunk 的 metadata。[`scripts/self_query_retriever.py`](scripts/self_query_retriever.py) 使用 `SelfQueryRetriever` 将自然语言中的主题或日期限制转换为 Chroma 过滤条件；过滤得到的 child 会再次映射回 parent，以避免只向模型提供碎片化上下文。
 
+### Rerank 精排（负例）
+
+[`scripts/rerank.py`](scripts/rerank.py) 在任意检索模式返回结果之后，提供一个可选的二次精排步骤：粗排阶段多召回候选（`top_k=10`），再用本地 Cross-Encoder（`BAAI/bge-reranker-base`）对每一对“问题 + 候选文本”单独打分，取分数最高的 `top_k` 个返回。模型统一存放于本地指定目录（首次运行自动下载，此后直接从本地加载，不发起网络请求），避免每次调用重复下载。
+
+设计上 Rerank 与前面四种检索模式正交，可以叠加在任意一种模式之上。实际叠加在当前最佳组合（元数据过滤 + parent 映射 + 结构化生成）上评测后，四项 RAGAS 指标均未提升，判定为负例。分析见下文“结论与反例”。
+
 ## 实验结果
 
 下表来自同一份包含 **20 条 RAGAS 合成样本**的评测集。数值只说明当前语料、模型、Prompt、评测模型与参数下的结果，不构成通用性能声明。
 
-| 指标 | Vector Baseline | Hybrid 0.7 / 0.3 | Parent-Child | Parent-Child + Structured | Metadata + Parent-Child + Structured |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Faithfulness | 0.8172 | 0.8375 | 0.8305 | 0.8922 | **0.9215** |
-| Answer Relevancy | 0.7979 | 0.7374 | **0.8020** | 0.7439 | 0.7890 |
-| Context Precision | 0.8444 | 0.8640 | 0.9737 | 0.9737 | **0.9792** |
-| Context Recall | 0.9500 | 0.9333 | **1.0000** | 0.9900 | 0.9567 |
+| 指标 | Vector Baseline | Hybrid 0.7 / 0.3 | Parent-Child | Parent-Child + Structured | Metadata + Parent-Child + Structured | + Rerank |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Faithfulness | 0.8172 | 0.8375 | 0.8305 | 0.8922 | **0.9215** | 0.8981 |
+| Answer Relevancy | 0.7979 | 0.7374 | **0.8020** | 0.7439 | 0.7890 | 0.7606 |
+| Context Precision | 0.8444 | 0.8640 | 0.9737 | 0.9737 | **0.9792** | 0.8905 |
+| Context Recall | 0.9500 | 0.9333 | **1.0000** | 0.9900 | 0.9567 | 0.9500 |
 
-当前最佳组合还得到以下自定义结构化输出统计：
+当前最佳组合（Metadata + Parent-Child + Structured，不含 Rerank）还得到以下自定义结构化输出统计：
 
 - 引用编号有效率：`1.0000`
 - JSON 解析失败率：`0.0000`
@@ -127,6 +135,7 @@ Markdown
 - **结构化输出提升可核查性。** Parent-Child + Structured 将 Faithfulness 提升到 `0.8922`，但 Answer Relevancy 有下降，说明格式约束并不会自动解决回答是否直达问题。
 - **元数据过滤不能只返回 child。** Self-query 直接返回经过滤的碎片 chunk 时，四项 RAGAS 指标显著下降；将其与 parent 映射组合后，Faithfulness 和 Context Precision 达到当前最高。这是本项目最重要的一次负例到改进的闭环。
 - **查询改写已经验证链路，但尚未验证收益。** 当前语料规模较小、主题集中，改写后往往仍命中相同 parent；未来在更大、主题重叠更多的语料上应重新评估。
+- **Rerank 叠加在已收敛的最佳组合上是负例。** 元数据过滤本身已经对候选做了强约束，粗排阶段多召回的候选相关性递减明显；Cross-Encoder 的相关性判断标准与 RAGAS 评测模型的判断标准不完全一致，二次排序反而让部分指标下降。人工抽查显示 Rerank 确实能在粗排候选中额外捞回个别相关片段，但这一收益在 20 条样本的平均表现上被排序偏差抵消。推测 Rerank 更适合叠加在噪声更多、未做强过滤的粗排结果上（例如未修复分词前的混合检索），这一假设留待更大规模语料上重新验证。
 
 完整终端输出、问题定位和实验解释见：
 
@@ -136,6 +145,7 @@ Markdown
 - [`experiments/结构化生成优化结果记录.md`](experiments/结构化生成优化结果记录.md)
 - [`experiments/元数据metadata检索结果记录.md`](experiments/元数据metadata检索结果记录.md)
 - [`experiments/多查询检索结果记录.md`](experiments/多查询检索结果记录.md)
+- [`experiments/Rerank精排结果记录.md`](experiments/Rerank精排结果记录.md)
 
 ## 项目结构
 
@@ -152,6 +162,7 @@ RAG/
 │   ├── structured_generate.py      # JSON 结构化回答与引用校验
 │   ├── self_query_retriever.py     # 元数据过滤与 child -> parent 映射
 │   ├── query_rewrite.py            # 多查询改写检索
+│   ├── rerank.py                   # Cross-Encoder 二次精排（当前评测为负例）
 │   ├── check_auto_tag_notes.py     # 为笔记生成主题与日期 metadata
 │   ├── TestsetGenerator.py         # RAGAS 测试集生成
 │   └── evalute.py                  # 真实 RAG 链路的 RAGAS 评测
@@ -171,6 +182,7 @@ RAG/
 - Python 3.10+
 - DeepSeek API Key
 - 本地 `Qwen3-Embedding-0.6B` 模型
+- 如需使用 Rerank：本地 `BAAI/bge-reranker-base` 模型（首次调用自动下载到配置目录，此后直接从本地加载）
 - CUDA 可选，但部分脚本当前将设备写为 `cuda`；CPU 环境需要将对应 `model_kwargs` 改为 `cpu`
 
 安装依赖：
@@ -179,7 +191,8 @@ RAG/
 pip install langchain langchain-community langchain-classic \
   langchain-text-splitters langchain-huggingface langchain-chroma \
   langchain-openai openai ragas pandas tqdm torch \
-  pydantic-settings python-dotenv jieba chromadb
+  pydantic-settings python-dotenv jieba chromadb \
+  sentence-transformers huggingface_hub
 ```
 
 复制并填写环境变量：
@@ -240,7 +253,7 @@ python scripts/RAG_pipeline.py
 
 ### 生成测试集与评测
 
-[`scripts/evalute.py`](scripts/evalute.py) 通过 `USE_HYBIRD`、`USE_PARENT_CHILD`、`USE_STRUCTURED` 和 `USE_SELF_QUERY` 开关选择实验模式，运行后会在本地 `output/` 写入逐样本评测 CSV 与结构化引用统计。
+[`scripts/evalute.py`](scripts/evalute.py) 通过 `USE_HYBIRD`、`USE_PARENT_CHILD`、`USE_STRUCTURED`、`USE_SELF_QUERY` 和 `USE_RERANK` 开关选择实验模式，运行后会在本地 `output/` 写入逐样本评测 CSV 与结构化引用统计。
 
 ```bash
 python scripts/evalute.py
@@ -266,7 +279,8 @@ python scripts/evalute.py
 - RAGAS 与 LangChain 仍有兼容性补丁和弃用警告，依赖版本尚未完全锁定。
 - 评测模式目前仍通过源码中的布尔开关切换，尚未提供统一 CLI。
 - 当前实验以质量指标为主，尚未系统记录端到端延迟、Token 用量和 API 成本。
-- PDF 加载、来源页码、Rerank、结构感知 Markdown 切分和服务化接口仍在后续计划中。
+- Rerank 当前仅在“元数据过滤 + 父子分块”这一种粗排组合上验证过负例，尚未在噪声更多的粗排结果（如未加权重调整的混合检索）上验证是否有正向收益。
+- PDF 加载、来源页码、结构感知 Markdown 切分和服务化接口仍在后续计划中。
 
 ## 贡献
 
